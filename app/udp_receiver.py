@@ -14,7 +14,6 @@ from app.shred import parse_shred_header
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8002
-
 MAX_UDP_PACKET_SIZE = 65535
 
 BATCH_SIZE = 500
@@ -27,30 +26,17 @@ def run_receiver(
     port: int,
     database_path: str,
 ) -> None:
-    database = ShredDatabase(
-        database_path,
-    )
+    database = ShredDatabase(database_path)
 
     sock = socket.socket(
         socket.AF_INET,
         socket.SOCK_DGRAM,
     )
-
-    sock.bind(
-        (host, port)
-    )
-
+    sock.bind((host, port))
     sock.settimeout(0.2)
 
-    print(
-        f"Listening for UDP shreds "
-        f"on {host}:{port}"
-    )
-
-    print(
-        f"SQLite database: "
-        f"{database.path}"
-    )
+    print(f"Listening on UDP {host}:{port}")
+    print(f"Database: {database.path}")
 
     pending: list[ShredArrival] = []
 
@@ -65,33 +51,22 @@ def run_receiver(
 
     try:
         while True:
-            now = time.monotonic()
-
             try:
                 payload, sender = sock.recvfrom(
                     MAX_UDP_PACKET_SIZE
                 )
-
             except socket.timeout:
                 payload = None
                 sender = None
 
             if payload is not None and sender is not None:
                 packet_count += 1
-
-                arrival_us = (
-                    time.time_ns()
-                    // 1000
-                )
+                arrival_us = time.time_ns() // 1000
 
                 try:
-                    shred = parse_shred_header(
-                        payload
-                    )
-
+                    shred = parse_shred_header(payload)
                 except ValueError:
                     invalid_count += 1
-
                 else:
                     parsed_count += 1
 
@@ -103,12 +78,8 @@ def run_receiver(
                             packet_size=len(payload),
                             slot=shred.slot,
                             shred_index=shred.index,
-                            fec_set_index=(
-                                shred.fec_set_index
-                            ),
-                            shred_type=(
-                                shred.shred_type.value
-                            ),
+                            fec_set_index=shred.fec_set_index,
+                            shred_type=shred.shred_type.value,
                             version=shred.version,
                             variant=shred.variant,
                         )
@@ -116,49 +87,33 @@ def run_receiver(
 
             now = time.monotonic()
 
-            should_flush = (
+            if (
                 len(pending) >= BATCH_SIZE
                 or (
                     pending
                     and now - last_flush
                     >= FLUSH_INTERVAL_SECONDS
                 )
-            )
-
-            if should_flush:
-                database.insert_many(
-                    pending
-                )
-
+            ):
+                database.insert_many(pending)
                 pending.clear()
-
                 last_flush = now
 
             if (
                 now - last_cleanup
                 >= CLEANUP_INTERVAL_SECONDS
             ):
-                deleted = (
-                    database.delete_older_than(
-                        hours=48
-                    )
+                deleted = database.delete_older_than(
+                    hours=48
                 )
 
                 if deleted:
-                    print(
-                        f"[cleanup] "
-                        f"deleted={deleted}"
-                    )
+                    print(f"[cleanup] deleted={deleted}")
 
                 last_cleanup = now
 
-            if (
-                now - last_stats
-                >= 1.0
-            ):
-                elapsed = (
-                    now - started_at
-                )
+            if now - last_stats >= 1.0:
+                elapsed = now - started_at
 
                 rate = (
                     packet_count / elapsed
@@ -166,16 +121,12 @@ def run_receiver(
                     else 0.0
                 )
 
-                stored = (
-                    database.count_records()
-                )
-
                 print(
                     f"[stats] "
                     f"packets={packet_count} "
                     f"parsed={parsed_count} "
                     f"invalid={invalid_count} "
-                    f"stored={stored} "
+                    f"stored={database.count_records()} "
                     f"buffered={len(pending)} "
                     f"rate={rate:.1f} pkt/s"
                 )
@@ -183,22 +134,11 @@ def run_receiver(
                 last_stats = now
 
     except KeyboardInterrupt:
-        print(
-            "\nStopping receiver..."
-        )
+        print("\nStopping receiver...")
 
     finally:
         if pending:
-            inserted = (
-                database.insert_many(
-                    pending
-                )
-            )
-
-            print(
-                f"Flushed {inserted} "
-                f"remaining records"
-            )
+            database.insert_many(pending)
 
         total = database.count_records()
 
@@ -214,9 +154,8 @@ def run_receiver(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Receive live Solana shreds "
-            "over UDP and store metadata "
-            "in SQLite."
+            "Receive Solana shred UDP packets "
+            "and store their metadata in SQLite."
         )
     )
 
@@ -233,9 +172,7 @@ def main() -> None:
 
     parser.add_argument(
         "--database",
-        default=str(
-            DEFAULT_DATABASE_PATH
-        ),
+        default=str(DEFAULT_DATABASE_PATH),
     )
 
     args = parser.parse_args()

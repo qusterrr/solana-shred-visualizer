@@ -81,7 +81,10 @@ class ShredDatabase:
 
             CREATE INDEX IF NOT EXISTS
                 idx_shred_arrivals_slot_fec
-            ON shred_arrivals(slot, fec_set_index);
+            ON shred_arrivals(
+                slot,
+                fec_set_index
+            );
 
             CREATE INDEX IF NOT EXISTS
                 idx_shred_arrivals_slot_index
@@ -176,14 +179,42 @@ class ShredDatabase:
                 MIN(arrival_us) AS first_arrival_us,
                 MAX(arrival_us) AS last_arrival_us,
                 COUNT(*) AS arrivals,
-                COUNT(DISTINCT fec_set_index)
-                    AS fec_sets
+                COUNT(DISTINCT fec_set_index) AS fec_sets
             FROM shred_arrivals
             GROUP BY slot
             ORDER BY slot DESC
             LIMIT ?
             """,
             (limit,),
+        ).fetchall()
+
+        return [
+            dict(row)
+            for row in rows
+        ]
+
+    def get_slot(
+        self,
+        slot: int,
+    ) -> list[dict]:
+        rows = self.connection.execute(
+            """
+            SELECT
+                arrival_us,
+                sender_ip,
+                sender_port,
+                packet_size,
+                slot,
+                shred_index,
+                fec_set_index,
+                shred_type,
+                version,
+                variant
+            FROM shred_arrivals
+            WHERE slot = ?
+            ORDER BY arrival_us ASC
+            """,
+            (slot,),
         ).fetchall()
 
         return [
