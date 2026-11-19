@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Solana Shred Visualizer</title>
+
+    <link
+        rel="stylesheet"
+        href="/style.css"
+    >
+
+    <script
+        src="https://cdn.plot.ly/plotly-2.35.2.min.js"
+    ></script>
+</head>
+
+<body>
+    <main class="container">
+
+        <header class="header">
+            <div>
+                <h1>Solana Shred Visualizer</h1>
+
+                <p>
+                    Live shred arrival monitoring by slot and FEC set
+                </p>
+            </div>
+
+            <div
+                id="connection-status"
+                class="status"
+            >
+                Connecting…
+            </div>
+        </header>
+
+        <section class="controls">
+
+            <label>
+                Slot
+
+                <select id="slot-select">
+                </select>
+            </label>
+
+            <button id="refresh-button">
+                Refresh
+            </button>
+
+            <label class="checkbox">
+                <input
+                    id="follow-latest"
+                    type="checkbox"
+                    checked
+                >
+
+                Follow latest
+            </label>
+
+        </section>
+
+        <section class="metrics">
+
+            <article class="metric">
+                <span>Arrivals</span>
+                <strong id="metric-arrivals">–</strong>
+            </article>
+
+            <article class="metric">
+                <span>FEC sets</span>
+                <strong id="metric-fec">–</strong>
+            </article>
+
+            <article class="metric">
+                <span>Data / Code</span>
+                <strong id="metric-types">–</strong>
+            </article>
+
+            <article class="metric">
+                <span>Duration</span>
+                <strong id="metric-duration">–</strong>
+            </article>
+
+        </section>
+
+        <section class="panel">
+
+            <div class="panel-header">
+                <div>
+                    <h2 id="chart-title">
+                        Shred arrivals
+                    </h2>
+
+                    <p>
+                        FEC set × time since first shred
+                    </p>
+                </div>
+            </div>
+
+            <div id="heatmap"></div>
+
+        </section>
+
+    </main>
+
+    <script src="/app.js"></script>
+</body>
+</html>
