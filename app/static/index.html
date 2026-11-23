@@ -21,94 +21,150 @@
 </head>
 
 <body>
-    <main class="container">
 
-        <header class="header">
-            <div>
-                <h1>Solana Shred Visualizer</h1>
+<main class="app">
 
-                <p>
-                    Live shred arrival monitoring by slot and FEC set
-                </p>
-            </div>
+    <header class="topbar">
 
-            <div
-                id="connection-status"
-                class="status"
-            >
-                Connecting…
-            </div>
-        </header>
+        <div>
+            <h1>Solana Shred Visualizer</h1>
 
-        <section class="controls">
+            <p>
+                Turbine shred arrival monitor
+            </p>
+        </div>
+
+        <div
+            id="connection-status"
+            class="connection-status"
+        >
+            CONNECTING
+        </div>
+
+    </header>
+
+
+    <section class="toolbar">
+
+        <div class="control">
+
+            <label for="slot-select">
+                SLOT
+            </label>
+
+            <select id="slot-select">
+            </select>
+
+        </div>
+
+
+        <div class="control">
+
+            <label for="auto-mode">
+                FOLLOW
+            </label>
+
+            <select id="auto-mode">
+
+                <option value="completed">
+                    Latest completed
+                </option>
+
+                <option value="live">
+                    Live current
+                </option>
+
+                <option value="off">
+                    Off
+                </option>
+
+            </select>
+
+        </div>
+
+
+        <div class="control">
 
             <label>
-                Slot
-
-                <select id="slot-select">
-                </select>
+                VIEW
             </label>
 
-            <button id="refresh-button">
-                Refresh
-            </button>
+            <div class="button-group">
 
-            <label class="checkbox">
-                <input
-                    id="follow-latest"
-                    type="checkbox"
-                    checked
+                <button
+                    id="timeline-button"
+                    class="view-button active"
+                    type="button"
                 >
+                    Timeline
+                </button>
 
-                Follow latest
-            </label>
+                <button
+                    id="density-button"
+                    class="view-button"
+                    type="button"
+                >
+                    Density
+                </button>
 
-        </section>
-
-        <section class="metrics">
-
-            <article class="metric">
-                <span>Arrivals</span>
-                <strong id="metric-arrivals">–</strong>
-            </article>
-
-            <article class="metric">
-                <span>FEC sets</span>
-                <strong id="metric-fec">–</strong>
-            </article>
-
-            <article class="metric">
-                <span>Data / Code</span>
-                <strong id="metric-types">–</strong>
-            </article>
-
-            <article class="metric">
-                <span>Duration</span>
-                <strong id="metric-duration">–</strong>
-            </article>
-
-        </section>
-
-        <section class="panel">
-
-            <div class="panel-header">
-                <div>
-                    <h2 id="chart-title">
-                        Shred arrivals
-                    </h2>
-
-                    <p>
-                        FEC set × time since first shred
-                    </p>
-                </div>
             </div>
 
-            <div id="heatmap"></div>
+        </div>
 
-        </section>
 
-    </main>
+        <button
+            id="refresh-button"
+            class="refresh-button"
+            type="button"
+        >
+            Refresh
+        </button>
 
-    <script src="/app.js"></script>
+    </section>
+
+
+    <section class="slot-info">
+
+        <strong id="slot-title">
+            Slot –
+        </strong>
+
+        <span id="slot-summary">
+            No data
+        </span>
+
+    </section>
+
+
+    <section class="visualization">
+
+        <div id="chart"></div>
+
+    </section>
+
+
+    <footer class="legend">
+
+        <span>
+            <i class="data-dot"></i>
+            Data shred
+        </span>
+
+        <span>
+            <i class="code-dot"></i>
+            Coding shred
+        </span>
+
+        <span>
+            <i class="limit-line"></i>
+            400 ms reference
+        </span>
+
+    </footer>
+
+</main>
+
+<script src="/app.js"></script>
+
 </body>
 </html>
