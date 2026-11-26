@@ -3,7 +3,11 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+)
 from fastapi.staticfiles import StaticFiles
 
 from app.database import ShredDatabase
@@ -80,14 +84,15 @@ def build_slot_response(
         "last_arrival_us":
             last_arrival_us,
 
-        "observed_span_ms": round(
-            (
-                last_arrival_us
-                - first_arrival_us
-            )
-            / 1000,
-            3,
-        ),
+        "observed_span_ms":
+            round(
+                (
+                    last_arrival_us
+                    - first_arrival_us
+                )
+                / 1000,
+                3,
+            ),
 
         "arrivals":
             len(records),
@@ -114,12 +119,12 @@ def health() -> dict:
     database = ShredDatabase()
 
     try:
-        records = (
-            database.count_records()
-        )
-
         last_arrival_us = (
             database.latest_arrival_us()
+        )
+
+        latest_slot = (
+            database.latest_slot()
         )
 
     finally:
@@ -129,7 +134,7 @@ def health() -> dict:
         return {
             "status": "ok",
             "live": False,
-            "records": records,
+            "latest_slot": None,
             "last_arrival_us": None,
             "last_arrival_age_ms": None,
         }
@@ -151,8 +156,8 @@ def health() -> dict:
             age_ms
             <= LIVE_TIMEOUT_MS,
 
-        "records":
-            records,
+        "latest_slot":
+            latest_slot,
 
         "last_arrival_us":
             last_arrival_us,

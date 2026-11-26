@@ -1,37 +1,32 @@
 const slotSelect =
-    document.getElementById("slot-select");
+    document.getElementById(
+        "slot-select"
+    );
 
 const autoModeSelect =
-    document.getElementById("auto-mode");
+    document.getElementById(
+        "auto-mode"
+    );
 
 const refreshButton =
-    document.getElementById("refresh-button");
+    document.getElementById(
+        "refresh-button"
+    );
 
 const cdfButton =
-    document.getElementById("cdf-button");
+    document.getElementById(
+        "cdf-button"
+    );
 
 const timelineButton =
-    document.getElementById("timeline-button");
+    document.getElementById(
+        "timeline-button"
+    );
 
 const densityButton =
-    document.getElementById("density-button");
-
-const connectionStatus =
-    document.getElementById("connection-status");
-
-const slotTitle =
-    document.getElementById("slot-title");
-
-const slotSummary =
-    document.getElementById("slot-summary");
-
-const viewHelp =
-    document.getElementById("view-help");
-
-
-const POLL_INTERVAL_MS = 500;
-
-const DENSITY_BUCKET_MS = 10;
+    document.getElementById(
+        "density-button"
+    );
 
 const olderButton =
     document.getElementById(
@@ -53,17 +48,33 @@ const goSlotButton =
         "go-slot-button"
     );
 
-/*
- * Current slot target/reference duration.
- * Alexander confirmed that 200 ms should be used,
- * not the old 400 ms value.
- */
+const connectionStatus =
+    document.getElementById(
+        "connection-status"
+    );
+
+const slotTitle =
+    document.getElementById(
+        "slot-title"
+    );
+
+const slotSummary =
+    document.getElementById(
+        "slot-summary"
+    );
+
+const viewHelp =
+    document.getElementById(
+        "view-help"
+    );
+
+
+const POLL_INTERVAL_MS = 500;
+
+const DENSITY_BUCKET_MS = 10;
+
 const SLOT_REFERENCE_MS = 200;
 
-/*
- * A FEC set becomes decodable after receiving
- * 32 unique shreds from that FEC set.
- */
 const DECODE_THRESHOLD = 32;
 
 
@@ -73,12 +84,14 @@ let currentView = "cdf";
 
 let currentData = null;
 
-let refreshInProgress = false;
-
 let currentSlotPage = [];
 
+let refreshInProgress = false;
+
+
 async function fetchJson(url) {
-    const response = await fetch(url);
+    const response =
+        await fetch(url);
 
     if (!response.ok) {
         throw new Error(
@@ -94,10 +107,58 @@ function setConnectionStatus(
     text,
     state = ""
 ) {
-    connectionStatus.textContent = text;
+    connectionStatus.textContent =
+        text;
 
     connectionStatus.className =
         `connection-status ${state}`;
+}
+
+
+async function setConnectionStatusFromHealth() {
+    try {
+        const health =
+            await fetchJson(
+                "/api/health"
+            );
+
+        if (health.live) {
+            setConnectionStatus(
+                "LIVE",
+                "ok"
+            );
+
+            return;
+        }
+
+        if (
+            health.last_arrival_age_ms
+            === null
+        ) {
+            setConnectionStatus(
+                "NO DATA",
+                "error"
+            );
+
+            return;
+        }
+
+        setConnectionStatus(
+            `STALE · ${(
+                health.last_arrival_age_ms
+                / 1000
+            ).toFixed(1)}s`,
+            "error"
+        );
+
+    } catch (error) {
+        console.error(error);
+
+        setConnectionStatus(
+            "OFFLINE",
+            "error"
+        );
+    }
 }
 
 
@@ -161,7 +222,9 @@ function updateSlotOptions(slots) {
 
     for (const item of slots) {
         const option =
-            document.createElement("option");
+            document.createElement(
+                "option"
+            );
 
         option.value =
             String(item.slot);
@@ -169,12 +232,16 @@ function updateSlotOptions(slots) {
         option.textContent =
             `Slot ${item.slot}`;
 
-        slotSelect.appendChild(option);
+        slotSelect.appendChild(
+            option
+        );
     }
 
     if (
         selectedSlot !== null
-        && available.has(selectedSlot)
+        && available.has(
+            selectedSlot
+        )
     ) {
         slotSelect.value =
             String(selectedSlot);
@@ -182,27 +249,90 @@ function updateSlotOptions(slots) {
 }
 
 
-function chooseAutomaticSlot(slots) {
-    if (slots.length === 0) {
-        return null;
+function ensureSlotOption(slot) {
+    const exists =
+        [...slotSelect.options]
+            .some(
+                option =>
+                    Number(
+                        option.value
+                    ) === slot
+            );
+
+    if (exists) {
+        return;
     }
 
-    const mode =
-        autoModeSelect.value;
+    const option =
+        document.createElement(
+            "option"
+        );
 
-    if (mode === "live") {
-        return slots[0].slot;
+    option.value =
+        String(slot);
+
+    option.textContent =
+        `Slot ${slot}`;
+
+    slotSelect.prepend(
+        option
+    );
+}
+
+
+async function loadSlotPage(
+    direction = "latest"
+) {
+    let url =
+        "/api/slots?limit=100";
+
+    if (
+        direction === "older"
+        && currentSlotPage.length > 0
+    ) {
+        const oldestSlot =
+            Math.min(
+                ...currentSlotPage.map(
+                    item => item.slot
+                )
+            );
+
+        url +=
+            `&before=${oldestSlot}`;
     }
 
-    if (mode === "previous") {
-        if (slots.length > 1) {
-            return slots[1].slot;
-        }
+    if (
+        direction === "newer"
+        && currentSlotPage.length > 0
+    ) {
+        const newestSlot =
+            Math.max(
+                ...currentSlotPage.map(
+                    item => item.slot
+                )
+            );
 
-        return slots[0].slot;
+        url +=
+            `&after=${newestSlot}`;
     }
 
-    return selectedSlot;
+    const result =
+        await fetchJson(url);
+
+    if (
+        result.slots.length === 0
+    ) {
+        return false;
+    }
+
+    currentSlotPage =
+        result.slots;
+
+    updateSlotOptions(
+        currentSlotPage
+    );
+
+    return true;
 }
 
 
@@ -234,243 +364,7 @@ function getFecSets(events) {
     );
 }
 
-async function loadSlotPage(
-    direction = "latest"
-) {
-    let url =
-        "/api/slots?limit=100";
 
-
-    if (
-        direction === "older"
-        && currentSlotPage.length > 0
-    ) {
-        const oldestSlot =
-            Math.min(
-                ...currentSlotPage.map(
-                    item => item.slot
-                )
-            );
-
-        url +=
-            `&before=${oldestSlot}`;
-    }
-
-
-    if (
-        direction === "newer"
-        && currentSlotPage.length > 0
-    ) {
-        const newestSlot =
-            Math.max(
-                ...currentSlotPage.map(
-                    item => item.slot
-                )
-            );
-
-        url +=
-            `&after=${newestSlot}`;
-    }
-
-
-    const result =
-        await fetchJson(url);
-
-
-    if (
-        result.slots.length === 0
-    ) {
-        return false;
-    }
-
-
-    currentSlotPage =
-        result.slots;
-
-
-    updateSlotOptions(
-        currentSlotPage
-    );
-
-
-    return true;
-}
-
-function ensureSlotOption(slot) {
-    const exists =
-        [...slotSelect.options]
-            .some(
-                option =>
-                    Number(option.value)
-                    === slot
-            );
-
-
-    if (exists) {
-        return;
-    }
-
-
-    const option =
-        document.createElement(
-            "option"
-        );
-
-
-    option.value =
-        String(slot);
-
-    option.textContent =
-        `Slot ${slot}`;
-
-
-    slotSelect.prepend(
-        option
-    );
-}
-
-
-async function goToSlot() {
-    const slot =
-        Number(
-            goSlotInput.value
-        );
-
-
-    if (
-        !Number.isInteger(slot)
-        || slot < 0
-    ) {
-        return;
-    }
-
-
-    try {
-        autoModeSelect.value =
-            "off";
-
-
-        ensureSlotOption(slot);
-
-
-        await loadSlot(slot);
-
-
-        setConnectionStatusFromHealth();
-
-    } catch (error) {
-        console.error(error);
-
-        alert(
-            `Slot ${slot} was not found in retained history.`
-        );
-    }
-}
-
-async function setConnectionStatusFromHealth() {
-    try {
-        const health =
-            await fetchJson(
-                "/api/health"
-            );
-
-
-        if (health.live) {
-            setConnectionStatus(
-                "LIVE",
-                "ok"
-            );
-
-            return;
-        }
-
-
-        if (
-            health.last_arrival_age_ms
-            === null
-        ) {
-            setConnectionStatus(
-                "NO DATA",
-                "error"
-            );
-
-            return;
-        }
-
-
-        setConnectionStatus(
-            `STALE · ${(
-                health.last_arrival_age_ms
-                / 1000
-            ).toFixed(1)}s`,
-            "error"
-        );
-
-    } catch (error) {
-        setConnectionStatus(
-            "OFFLINE",
-            "error"
-        );
-    }
-}
-
-async function refreshLive() {
-    if (refreshInProgress) {
-        return;
-    }
-
-
-    refreshInProgress = true;
-
-
-    try {
-        const data =
-            await fetchJson(
-                "/api/live"
-            );
-
-
-        selectedSlot =
-            data.slot;
-
-        currentData =
-            data;
-
-
-        ensureSlotOption(
-            data.slot
-        );
-
-
-        slotSelect.value =
-            String(data.slot);
-
-
-        updateSummary(data);
-
-        renderCurrentView();
-
-
-        await setConnectionStatusFromHealth();
-
-    } catch (error) {
-        console.error(error);
-
-        setConnectionStatus(
-            "ERROR",
-            "error"
-        );
-
-    } finally {
-        refreshInProgress = false;
-    }
-}
-
-
-/*
- * Data and coding shred indices can share numeric values,
- * therefore the shred type is included in the unique key.
- */
 function getUniqueShredKey(event) {
     return (
         `${event.shred_type}:` +
@@ -479,12 +373,6 @@ function getUniqueShredKey(event) {
 }
 
 
-/*
- * Returns arrival information separately for each FEC set.
- *
- * Duplicate arrivals do not increase the unique shred count.
- * decodeTime is the arrival time of the 32nd unique shred.
- */
 function calculateFecStats(events) {
     const groups =
         new Map();
@@ -502,16 +390,19 @@ function calculateFecStats(events) {
         }
 
         groups
-            .get(event.fec_set_index)
+            .get(
+                event.fec_set_index
+            )
             .push(event);
     }
-
 
     const result =
         new Map();
 
-
-    for (const [fec, fecEvents] of groups) {
+    for (
+        const [fec, fecEvents]
+        of groups
+    ) {
         const sorted =
             [...fecEvents].sort(
                 (a, b) =>
@@ -526,10 +417,11 @@ function calculateFecStats(events) {
 
         let decodeTime = null;
 
-
         for (const event of sorted) {
             const key =
-                getUniqueShredKey(event);
+                getUniqueShredKey(
+                    event
+                );
 
             if (seen.has(key)) {
                 continue;
@@ -537,27 +429,27 @@ function calculateFecStats(events) {
 
             seen.add(key);
 
-            cumulative.push({
-                arrival_ms:
-                    event.arrival_ms,
+            cumulative.push(
+                {
+                    arrival_ms:
+                        event.arrival_ms,
 
-                count:
-                    seen.size,
+                    count:
+                        seen.size,
 
-                event:
-                    event,
-            });
-
+                    event:
+                        event,
+                }
+            );
 
             if (
-                seen.size ===
-                DECODE_THRESHOLD
+                seen.size
+                === DECODE_THRESHOLD
             ) {
                 decodeTime =
                     event.arrival_ms;
             }
         }
-
 
         result.set(
             fec,
@@ -579,7 +471,6 @@ function calculateFecStats(events) {
         );
     }
 
-
     return result;
 }
 
@@ -588,11 +479,12 @@ function getTimelineRange(data) {
     const maximum =
         Math.max(
             SLOT_REFERENCE_MS,
-            data.duration_ms
+            data.observed_span_ms
         );
 
     return [
         0,
+
         Math.ceil(
             maximum / 50
         ) * 50 + 20,
@@ -644,12 +536,6 @@ function createReferenceAnnotation() {
 }
 
 
-/*
- * CDF / cumulative arrival view.
- *
- * Each line represents one FEC set.
- * Y is the number of unique shreds received.
- */
 function createCdf(data) {
     const fecStats =
         calculateFecStats(
@@ -661,9 +547,7 @@ function createCdf(data) {
             (a, b) => a - b
         );
 
-
     const traces = [];
-
 
     const colors = [
         "#5b8def",
@@ -677,7 +561,6 @@ function createCdf(data) {
         "#9d9d9d",
     ];
 
-
     fecSets.forEach(
         (fec, index) => {
             const stats =
@@ -689,101 +572,106 @@ function createCdf(data) {
                     % colors.length
                 ];
 
-
-            traces.push({
-                type: "scattergl",
-
-                mode: "lines",
-
-                name:
-                    `FEC ${fec}`,
-
-                x:
-                    stats.cumulative.map(
-                        point =>
-                            point.arrival_ms
-                    ),
-
-                y:
-                    stats.cumulative.map(
-                        point =>
-                            point.count
-                    ),
-
-                line: {
-                    color: color,
-                    width: 2,
-                    shape: "hv",
-                },
-
-                customdata:
-                    stats.cumulative.map(
-                        point => [
-                            fec,
-                            point.event.shred_index,
-                            point.event.shred_type,
-                        ]
-                    ),
-
-                hovertemplate:
-                    "<b>FEC set index %{customdata[0]}</b>" +
-                    "<br>Arrival: %{x:.2f} ms" +
-                    "<br>Unique shreds: %{y}" +
-                    "<br>Index: %{customdata[1]}" +
-                    "<br>Type: %{customdata[2]}" +
-                    "<extra></extra>",
-            });
-
-
-            if (
-                stats.decodeTime !== null
-            ) {
-                traces.push({
+            traces.push(
+                {
                     type: "scatter",
 
-                    mode: "markers",
+                    mode: "lines",
 
                     name:
-                        `FEC ${fec} decodable`,
+                        `FEC ${fec}`,
 
-                    showlegend: false,
+                    x:
+                        stats.cumulative.map(
+                            point =>
+                                point.arrival_ms
+                        ),
 
-                    x: [
-                        stats.decodeTime
-                    ],
+                    y:
+                        stats.cumulative.map(
+                            point =>
+                                point.count
+                        ),
 
-                    y: [
-                        DECODE_THRESHOLD
-                    ],
-
-                    customdata: [
-                        [fec]
-                    ],
-
-                    marker: {
-                        size: 10,
-                        symbol:
-                            "diamond-open",
-
+                    line: {
                         color: color,
-
-                        line: {
-                            width: 2,
-                            color: color,
-                        },
+                        width: 2,
+                        shape: "hv",
                     },
 
+                    customdata:
+                        stats.cumulative.map(
+                            point => [
+                                fec,
+                                point.event
+                                    .shred_index,
+                                point.event
+                                    .shred_type,
+                            ]
+                        ),
+
                     hovertemplate:
-                        "<b>FEC decodable</b>" +
-                        "<br>FEC set index: %{customdata[0]}" +
-                        "<br>Time: %{x:.2f} ms" +
-                        "<br>Unique shreds: 32" +
+                        "<b>FEC set index %{customdata[0]}</b>" +
+                        "<br>Arrival: %{x:.2f} ms" +
+                        "<br>Unique shreds: %{y}" +
+                        "<br>Index: %{customdata[1]}" +
+                        "<br>Type: %{customdata[2]}" +
                         "<extra></extra>",
-                });
+                }
+            );
+
+            if (
+                stats.decodeTime
+                !== null
+            ) {
+                traces.push(
+                    {
+                        type: "scatter",
+
+                        mode: "markers",
+
+                        name:
+                            `FEC ${fec} decodable`,
+
+                        showlegend: false,
+
+                        x: [
+                            stats.decodeTime
+                        ],
+
+                        y: [
+                            DECODE_THRESHOLD
+                        ],
+
+                        customdata: [
+                            [fec]
+                        ],
+
+                        marker: {
+                            size: 10,
+
+                            symbol:
+                                "diamond-open",
+
+                            color: color,
+
+                            line: {
+                                width: 2,
+                                color: color,
+                            },
+                        },
+
+                        hovertemplate:
+                            "<b>FEC decodable</b>" +
+                            "<br>FEC set index: %{customdata[0]}" +
+                            "<br>Time: %{x:.2f} ms" +
+                            "<br>Unique shreds: 32" +
+                            "<extra></extra>",
+                    }
+                );
             }
         }
     );
-
 
     const maximumUnique =
         Math.max(
@@ -796,7 +684,6 @@ function createCdf(data) {
                     stats.uniqueCount
             )
         );
-
 
     const layout = {
         paper_bgcolor:
@@ -889,8 +776,11 @@ function createCdf(data) {
 
                 xref: "paper",
 
-                y0: DECODE_THRESHOLD,
-                y1: DECODE_THRESHOLD,
+                y0:
+                    DECODE_THRESHOLD,
+
+                y1:
+                    DECODE_THRESHOLD,
 
                 line: {
                     color: "#737b85",
@@ -905,7 +795,8 @@ function createCdf(data) {
 
             {
                 x: 1,
-                y: DECODE_THRESHOLD,
+                y:
+                    DECODE_THRESHOLD,
 
                 xref: "paper",
                 yref: "y",
@@ -926,7 +817,6 @@ function createCdf(data) {
         ],
     };
 
-
     Plotly.react(
         "chart",
         traces,
@@ -944,9 +834,6 @@ function createCdf(data) {
 }
 
 
-/*
- * Individual shred arrival timeline.
- */
 function createTimeline(data) {
     const events =
         data.events;
@@ -957,14 +844,12 @@ function createTimeline(data) {
     const fecStats =
         calculateFecStats(events);
 
-
     const dataEvents =
         events.filter(
             event =>
                 event.shred_type
                 === "data"
         );
-
 
     const codeEvents =
         events.filter(
@@ -973,9 +858,9 @@ function createTimeline(data) {
                 === "code"
         );
 
-
     const dataTrace = {
         type: "scattergl",
+
         mode: "markers",
 
         name: "Data",
@@ -1021,9 +906,9 @@ function createTimeline(data) {
             "<extra></extra>",
     };
 
-
     const codeTrace = {
         type: "scattergl",
+
         mode: "markers",
 
         name: "Coding",
@@ -1069,18 +954,17 @@ function createTimeline(data) {
             "<extra></extra>",
     };
 
-
     const decodeX = [];
     const decodeY = [];
     const decodeCustom = [];
-
 
     for (
         const [fec, stats]
         of fecStats
     ) {
         if (
-            stats.decodeTime === null
+            stats.decodeTime
+            === null
         ) {
             continue;
         }
@@ -1100,7 +984,6 @@ function createTimeline(data) {
             ]
         );
     }
-
 
     const decodeTrace = {
         type: "scatter",
@@ -1137,7 +1020,6 @@ function createTimeline(data) {
             "<br>Threshold: 32 unique shreds" +
             "<extra></extra>",
     };
-
 
     const layout = {
         paper_bgcolor:
@@ -1199,7 +1081,9 @@ function createTimeline(data) {
                 "array",
 
             categoryarray:
-                fecSets.map(String),
+                fecSets.map(
+                    String
+                ),
 
             gridcolor:
                 "#1f252c",
@@ -1225,15 +1109,17 @@ function createTimeline(data) {
         ],
     };
 
-
     Plotly.react(
         "chart",
+
         [
             dataTrace,
             codeTrace,
             decodeTrace,
         ],
+
         layout,
+
         {
             responsive: true,
             displaylogo: false,
@@ -1270,9 +1156,6 @@ function percentile(
 }
 
 
-/*
- * Aggregated density heatmap.
- */
 function createDensity(data) {
     const events =
         data.events;
@@ -1283,32 +1166,33 @@ function createDensity(data) {
     const maximum =
         Math.max(
             SLOT_REFERENCE_MS,
-            data.duration_ms
+            data.observed_span_ms
         );
 
     const chartEnd =
         Math.ceil(
-            maximum /
-            DENSITY_BUCKET_MS
-        ) * DENSITY_BUCKET_MS;
+            maximum
+            / DENSITY_BUCKET_MS
+        )
+        * DENSITY_BUCKET_MS;
 
     const bucketCount =
         Math.floor(
-            chartEnd /
-            DENSITY_BUCKET_MS
+            chartEnd
+            / DENSITY_BUCKET_MS
         ) + 1;
-
 
     const x =
         Array.from(
             {
-                length: bucketCount,
+                length:
+                    bucketCount,
             },
-            (_, index) =>
-                index *
-                DENSITY_BUCKET_MS
-        );
 
+            (_, index) =>
+                index
+                * DENSITY_BUCKET_MS
+        );
 
     const fecMap =
         new Map();
@@ -1322,7 +1206,6 @@ function createDensity(data) {
         }
     );
 
-
     const z =
         fecSets.map(
             () =>
@@ -1330,7 +1213,6 @@ function createDensity(data) {
                     bucketCount
                 ).fill(null)
         );
-
 
     for (const event of events) {
         const row =
@@ -1344,6 +1226,7 @@ function createDensity(data) {
                     event.arrival_ms
                     / DENSITY_BUCKET_MS
                 ),
+
                 bucketCount - 1
             );
 
@@ -1352,11 +1235,11 @@ function createDensity(data) {
             === null
         ) {
             z[row][column] = 1;
+
         } else {
             z[row][column] += 1;
         }
     }
-
 
     const values =
         z.flat().filter(
@@ -1364,16 +1247,15 @@ function createDensity(data) {
                 value !== null
         );
 
-
     const zMax =
         Math.max(
             1,
+
             percentile(
                 values,
                 0.95
             )
         );
-
 
     const trace = {
         type: "heatmap",
@@ -1381,7 +1263,9 @@ function createDensity(data) {
         x: x,
 
         y:
-            fecSets.map(String),
+            fecSets.map(
+                String
+            ),
 
         z: z,
 
@@ -1391,10 +1275,25 @@ function createDensity(data) {
         hoverongaps: false,
 
         colorscale: [
-            [0.0, "#182432"],
-            [0.35, "#284e70"],
-            [0.7, "#3f78a8"],
-            [1.0, "#8cb8d8"],
+            [
+                0.0,
+                "#182432"
+            ],
+
+            [
+                0.35,
+                "#284e70"
+            ],
+
+            [
+                0.7,
+                "#3f78a8"
+            ],
+
+            [
+                1.0,
+                "#8cb8d8"
+            ],
         ],
 
         colorbar: {
@@ -1419,7 +1318,6 @@ function createDensity(data) {
             "<br>Arrivals %{z}" +
             "<extra></extra>",
     };
-
 
     const layout = {
         paper_bgcolor:
@@ -1469,7 +1367,9 @@ function createDensity(data) {
                 "array",
 
             categoryarray:
-                fecSets.map(String),
+                fecSets.map(
+                    String
+                ),
 
             gridcolor:
                 "#1f252c",
@@ -1491,7 +1391,6 @@ function createDensity(data) {
             createReferenceAnnotation(),
         ],
     };
-
 
     Plotly.react(
         "chart",
@@ -1518,7 +1417,10 @@ function renderCurrentView() {
         return;
     }
 
-    if (currentView === "density") {
+    if (
+        currentView
+        === "density"
+    ) {
         createDensity(
             currentData
         );
@@ -1544,12 +1446,64 @@ async function loadSlot(slot) {
     currentData =
         data;
 
+    ensureSlotOption(
+        data.slot
+    );
+
     slotSelect.value =
         String(data.slot);
 
     updateSummary(data);
 
     renderCurrentView();
+}
+
+
+async function refreshLive() {
+    if (refreshInProgress) {
+        return;
+    }
+
+    refreshInProgress = true;
+
+    try {
+        const data =
+            await fetchJson(
+                "/api/live"
+            );
+
+        selectedSlot =
+            data.slot;
+
+        currentData =
+            data;
+
+        ensureSlotOption(
+            data.slot
+        );
+
+        slotSelect.value =
+            String(data.slot);
+
+        updateSummary(data);
+
+        renderCurrentView();
+
+        await (
+            setConnectionStatusFromHealth()
+        );
+
+    } catch (error) {
+        console.error(error);
+
+        setConnectionStatus(
+            "ERROR",
+            "error"
+        );
+
+    } finally {
+        refreshInProgress = false;
+    }
 }
 
 
@@ -1563,35 +1517,30 @@ async function refresh() {
         return;
     }
 
-
     if (refreshInProgress) {
         return;
     }
 
-
     refreshInProgress = true;
-
 
     try {
         if (
-            currentSlotPage.length === 0
+            currentSlotPage.length
+            === 0
         ) {
             await loadSlotPage(
                 "latest"
             );
         }
 
-
         const slots =
             currentSlotPage;
-
 
         if (slots.length === 0) {
             throw new Error(
                 "No slots available"
             );
         }
-
 
         if (
             autoModeSelect.value
@@ -1603,25 +1552,65 @@ async function refresh() {
                     : slots[0].slot;
         }
 
-
-        if (selectedSlot === null) {
+        if (
+            selectedSlot === null
+        ) {
             selectedSlot =
                 slots[0].slot;
         }
-
 
         await loadSlot(
             selectedSlot
         );
 
-
-        await setConnectionStatusFromHealth();
+        await (
+            setConnectionStatusFromHealth()
+        );
 
     } catch (error) {
         console.error(error);
 
     } finally {
         refreshInProgress = false;
+    }
+}
+
+
+async function goToSlot() {
+    const slot =
+        Number(
+            goSlotInput.value
+        );
+
+    if (
+        !Number.isInteger(slot)
+        || slot < 0
+    ) {
+        return;
+    }
+
+    try {
+        autoModeSelect.value =
+            "off";
+
+        ensureSlotOption(
+            slot
+        );
+
+        await loadSlot(
+            slot
+        );
+
+        await (
+            setConnectionStatusFromHealth()
+        );
+
+    } catch (error) {
+        console.error(error);
+
+        alert(
+            `Slot ${slot} was not found in retained history.`
+        );
     }
 }
 
@@ -1663,7 +1652,9 @@ refreshButton.addEventListener(
 cdfButton.addEventListener(
     "click",
     () => {
-        setView("cdf");
+        setView(
+            "cdf"
+        );
     }
 );
 
@@ -1671,7 +1662,9 @@ cdfButton.addEventListener(
 timelineButton.addEventListener(
     "click",
     () => {
-        setView("timeline");
+        setView(
+            "timeline"
+        );
     }
 );
 
@@ -1679,9 +1672,12 @@ timelineButton.addEventListener(
 densityButton.addEventListener(
     "click",
     () => {
-        setView("density");
+        setView(
+            "density"
+        );
     }
 );
+
 
 olderButton.addEventListener(
     "click",
@@ -1689,21 +1685,18 @@ olderButton.addEventListener(
         autoModeSelect.value =
             "off";
 
-
         const loaded =
             await loadSlotPage(
                 "older"
             );
 
-
         if (!loaded) {
             return;
         }
 
-
         selectedSlot =
-            currentSlotPage[0].slot;
-
+            currentSlotPage[0]
+                .slot;
 
         await loadSlot(
             selectedSlot
@@ -1718,21 +1711,20 @@ newerButton.addEventListener(
         autoModeSelect.value =
             "off";
 
-
         const loaded =
             await loadSlotPage(
                 "newer"
             );
 
-
         if (!loaded) {
             return;
         }
 
-
         selectedSlot =
-            currentSlotPage[0].slot;
-
+            currentSlotPage[
+                currentSlotPage.length
+                - 1
+            ].slot;
 
         await loadSlot(
             selectedSlot
@@ -1751,7 +1743,8 @@ goSlotInput.addEventListener(
     "keydown",
     async event => {
         if (
-            event.key === "Enter"
+            event.key
+            === "Enter"
         ) {
             await goToSlot();
         }
@@ -1768,14 +1761,18 @@ setInterval(
             await refresh();
         }
     },
+
     POLL_INTERVAL_MS
 );
 
 
 updateViewHelp();
 
+
 loadSlotPage(
     "latest"
 ).then(
-    () => refresh()
+    async () => {
+        await refresh();
+    }
 );

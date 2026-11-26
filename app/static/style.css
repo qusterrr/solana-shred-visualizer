@@ -18,9 +18,11 @@
     --danger: #d06c75;
 }
 
+
 * {
     box-sizing: border-box;
 }
+
 
 html,
 body {
@@ -39,14 +41,17 @@ body {
         sans-serif;
 }
 
+
 body {
     padding: 28px;
 }
+
 
 .app {
     width: min(1500px, 100%);
     margin: 0 auto;
 }
+
 
 .topbar {
     display: flex;
@@ -59,6 +64,7 @@ body {
         1px solid var(--border);
 }
 
+
 .topbar h1 {
     margin: 0;
 
@@ -67,12 +73,14 @@ body {
     letter-spacing: -0.02em;
 }
 
+
 .topbar p {
     margin: 5px 0 0;
 
     color: var(--muted);
     font-size: 13px;
 }
+
 
 .connection-status {
     font-family:
@@ -87,18 +95,23 @@ body {
     color: var(--muted);
 }
 
+
 .connection-status.ok {
     color: var(--success);
 }
+
 
 .connection-status.error {
     color: var(--danger);
 }
 
+
 .toolbar {
     display: flex;
     align-items: end;
-    gap: 20px;
+    flex-wrap: wrap;
+
+    gap: 16px;
 
     padding: 16px 0;
 
@@ -106,11 +119,13 @@ body {
         1px solid var(--border);
 }
 
+
 .control {
     display: flex;
     flex-direction: column;
     gap: 6px;
 }
+
 
 .control label {
     color: var(--muted);
@@ -120,8 +135,10 @@ body {
     letter-spacing: 0.1em;
 }
 
+
 select,
-button {
+button,
+input {
     height: 34px;
 
     border:
@@ -136,50 +153,89 @@ button {
     font-size: 13px;
 }
 
+
 select {
     padding: 0 30px 0 10px;
 }
 
+
+input {
+    padding: 0 10px;
+}
+
+
 #slot-select {
     min-width: 180px;
 }
+
 
 button {
     padding: 0 12px;
     cursor: pointer;
 }
 
+
 button:hover {
     background:
         var(--surface-secondary);
 }
 
+
 .button-group {
     display: flex;
 }
+
 
 .button-group button {
     border-radius: 0;
 }
 
+
 .button-group button:first-child {
-    border-radius: 4px 0 0 4px;
+    border-radius:
+        4px 0 0 4px;
 }
+
 
 .button-group button:last-child {
     margin-left: -1px;
 
-    border-radius: 0 4px 4px 0;
+    border-radius:
+        0 4px 4px 0;
 }
+
 
 .view-button.active {
     background: #252b33;
     border-color: #4a535e;
 }
 
+
 .refresh-button {
     margin-left: auto;
 }
+
+
+.go-to-slot {
+    display: flex;
+}
+
+
+.go-to-slot input {
+    width: 145px;
+
+    border-radius:
+        4px 0 0 4px;
+}
+
+
+.go-to-slot button {
+    margin-left: -1px;
+
+    border-radius:
+        0 4px 4px 0;
+}
+
 
 .slot-info {
     display: flex;
@@ -188,6 +244,7 @@ button:hover {
 
     padding: 18px 0 10px;
 }
+
 
 .slot-info strong {
     font-family:
@@ -200,10 +257,24 @@ button:hover {
     font-weight: 600;
 }
 
+
 .slot-info span {
     color: var(--muted);
     font-size: 13px;
 }
+
+
+.view-help {
+    min-height: 30px;
+
+    padding: 0 0 10px;
+
+    color: var(--muted);
+
+    font-size: 12px;
+    line-height: 1.5;
+}
+
 
 .visualization {
     min-height: 600px;
@@ -215,13 +286,16 @@ button:hover {
         1px solid var(--border);
 }
 
+
 #chart {
     width: 100%;
     height: 620px;
 }
 
+
 .legend {
     display: flex;
+    flex-wrap: wrap;
     gap: 24px;
 
     padding-top: 12px;
@@ -230,11 +304,13 @@ button:hover {
     font-size: 12px;
 }
 
+
 .legend span {
     display: flex;
     align-items: center;
     gap: 7px;
 }
+
 
 .data-dot,
 .code-dot {
@@ -244,16 +320,19 @@ button:hover {
     height: 7px;
 }
 
+
 .data-dot {
     border-radius: 50%;
     background: var(--data);
 }
+
 
 .code-dot {
     background: var(--code);
 
     transform: rotate(45deg);
 }
+
 
 .limit-line {
     display: inline-block;
@@ -264,7 +343,8 @@ button:hover {
         1px dashed #737b85;
 }
 
-@media (max-width: 850px) {
+
+@media (max-width: 1000px) {
 
     body {
         padding: 16px;
@@ -285,48 +365,12 @@ button:hover {
         gap: 5px;
     }
 
-}
-.view-help {
-    min-height: 30px;
+    .go-to-slot input {
+        width: 100%;
+    }
 
-    padding: 0 0 10px;
+    #chart {
+        height: 560px;
+    }
 
-    color: var(--muted);
-
-    font-size: 12px;
-    line-height: 1.5;
-}
-input {
-    height: 34px;
-
-    border:
-        1px solid var(--border-light);
-
-    border-radius: 4px;
-
-    background: var(--surface);
-    color: var(--text);
-
-    padding: 0 10px;
-
-    font: inherit;
-    font-size: 13px;
-}
-
-.go-to-slot {
-    display: flex;
-}
-
-.go-to-slot input {
-    width: 145px;
-
-    border-radius:
-        4px 0 0 4px;
-}
-
-.go-to-slot button {
-    margin-left: -1px;
-
-    border-radius:
-        0 4px 4px 0;
 }
