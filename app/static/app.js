@@ -29,9 +29,29 @@ const viewHelp =
     document.getElementById("view-help");
 
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 500;
 
 const DENSITY_BUCKET_MS = 10;
+
+const olderButton =
+    document.getElementById(
+        "older-button"
+    );
+
+const newerButton =
+    document.getElementById(
+        "newer-button"
+    );
+
+const goSlotInput =
+    document.getElementById(
+        "go-slot-input"
+    );
+
+const goSlotButton =
+    document.getElementById(
+        "go-slot-button"
+    );
 
 /*
  * Current slot target/reference duration.
@@ -55,6 +75,7 @@ let currentData = null;
 
 let refreshInProgress = false;
 
+let currentSlotPage = [];
 
 async function fetchJson(url) {
     const response = await fetch(url);
@@ -195,7 +216,7 @@ function updateSummary(data) {
             `${data.fec_count} FEC`,
             `${data.data_shreds} data`,
             `${data.code_shreds} code`,
-            `${data.duration_ms.toFixed(1)} ms`,
+            `observed ${data.observed_span_ms.toFixed(1)} ms`,
         ].join(" · ");
 }
 
@@ -211,6 +232,238 @@ function getFecSets(events) {
     ].sort(
         (a, b) => a - b
     );
+}
+
+async function loadSlotPage(
+    direction = "latest"
+) {
+    let url =
+        "/api/slots?limit=100";
+
+
+    if (
+        direction === "older"
+        && currentSlotPage.length > 0
+    ) {
+        const oldestSlot =
+            Math.min(
+                ...currentSlotPage.map(
+                    item => item.slot
+                )
+            );
+
+        url +=
+            `&before=${oldestSlot}`;
+    }
+
+
+    if (
+        direction === "newer"
+        && currentSlotPage.length > 0
+    ) {
+        const newestSlot =
+            Math.max(
+                ...currentSlotPage.map(
+                    item => item.slot
+                )
+            );
+
+        url +=
+            `&after=${newestSlot}`;
+    }
+
+
+    const result =
+        await fetchJson(url);
+
+
+    if (
+        result.slots.length === 0
+    ) {
+        return false;
+    }
+
+
+    currentSlotPage =
+        result.slots;
+
+
+    updateSlotOptions(
+        currentSlotPage
+    );
+
+
+    return true;
+}
+
+function ensureSlotOption(slot) {
+    const exists =
+        [...slotSelect.options]
+            .some(
+                option =>
+                    Number(option.value)
+                    === slot
+            );
+
+
+    if (exists) {
+        return;
+    }
+
+
+    const option =
+        document.createElement(
+            "option"
+        );
+
+
+    option.value =
+        String(slot);
+
+    option.textContent =
+        `Slot ${slot}`;
+
+
+    slotSelect.prepend(
+        option
+    );
+}
+
+
+async function goToSlot() {
+    const slot =
+        Number(
+            goSlotInput.value
+        );
+
+
+    if (
+        !Number.isInteger(slot)
+        || slot < 0
+    ) {
+        return;
+    }
+
+
+    try {
+        autoModeSelect.value =
+            "off";
+
+
+        ensureSlotOption(slot);
+
+
+        await loadSlot(slot);
+
+
+        setConnectionStatusFromHealth();
+
+    } catch (error) {
+        console.error(error);
+
+        alert(
+            `Slot ${slot} was not found in retained history.`
+        );
+    }
+}
+
+async function setConnectionStatusFromHealth() {
+    try {
+        const health =
+            await fetchJson(
+                "/api/health"
+            );
+
+
+        if (health.live) {
+            setConnectionStatus(
+                "LIVE",
+                "ok"
+            );
+
+            return;
+        }
+
+
+        if (
+            health.last_arrival_age_ms
+            === null
+        ) {
+            setConnectionStatus(
+                "NO DATA",
+                "error"
+            );
+
+            return;
+        }
+
+
+        setConnectionStatus(
+            `STALE · ${(
+                health.last_arrival_age_ms
+                / 1000
+            ).toFixed(1)}s`,
+            "error"
+        );
+
+    } catch (error) {
+        setConnectionStatus(
+            "OFFLINE",
+            "error"
+        );
+    }
+}
+
+async function refreshLive() {
+    if (refreshInProgress) {
+        return;
+    }
+
+
+    refreshInProgress = true;
+
+
+    try {
+        const data =
+            await fetchJson(
+                "/api/live"
+            );
+
+
+        selectedSlot =
+            data.slot;
+
+        currentData =
+            data;
+
+
+        ensureSlotOption(
+            data.slot
+        );
+
+
+        slotSelect.value =
+            String(data.slot);
+
+
+        updateSummary(data);
+
+        renderCurrentView();
+
+
+        await setConnectionStatusFromHealth();
+
+    } catch (error) {
+        console.error(error);
+
+        setConnectionStatus(
+            "ERROR",
+            "error"
+        );
+
+    } finally {
+        refreshInProgress = false;
+    }
 }
 
 
@@ -1301,20 +1554,37 @@ async function loadSlot(slot) {
 
 
 async function refresh() {
+    if (
+        autoModeSelect.value
+        === "live"
+    ) {
+        await refreshLive();
+
+        return;
+    }
+
+
     if (refreshInProgress) {
         return;
     }
 
+
     refreshInProgress = true;
 
+
     try {
-        const result =
-            await fetchJson(
-                "/api/slots?limit=100"
+        if (
+            currentSlotPage.length === 0
+        ) {
+            await loadSlotPage(
+                "latest"
             );
+        }
+
 
         const slots =
-            result.slots;
+            currentSlotPage;
+
 
         if (slots.length === 0) {
             throw new Error(
@@ -1322,39 +1592,33 @@ async function refresh() {
             );
         }
 
-        updateSlotOptions(slots);
 
-        const automaticSlot =
-            chooseAutomaticSlot(
-                slots
-            );
-
-        if (automaticSlot !== null) {
+        if (
+            autoModeSelect.value
+            === "previous"
+        ) {
             selectedSlot =
-                automaticSlot;
+                slots.length > 1
+                    ? slots[1].slot
+                    : slots[0].slot;
         }
+
 
         if (selectedSlot === null) {
             selectedSlot =
                 slots[0].slot;
         }
 
+
         await loadSlot(
             selectedSlot
         );
 
-        setConnectionStatus(
-            "LIVE",
-            "ok"
-        );
+
+        await setConnectionStatusFromHealth();
 
     } catch (error) {
         console.error(error);
-
-        setConnectionStatus(
-            "ERROR",
-            "error"
-        );
 
     } finally {
         refreshInProgress = false;
@@ -1419,6 +1683,81 @@ densityButton.addEventListener(
     }
 );
 
+olderButton.addEventListener(
+    "click",
+    async () => {
+        autoModeSelect.value =
+            "off";
+
+
+        const loaded =
+            await loadSlotPage(
+                "older"
+            );
+
+
+        if (!loaded) {
+            return;
+        }
+
+
+        selectedSlot =
+            currentSlotPage[0].slot;
+
+
+        await loadSlot(
+            selectedSlot
+        );
+    }
+);
+
+
+newerButton.addEventListener(
+    "click",
+    async () => {
+        autoModeSelect.value =
+            "off";
+
+
+        const loaded =
+            await loadSlotPage(
+                "newer"
+            );
+
+
+        if (!loaded) {
+            return;
+        }
+
+
+        selectedSlot =
+            currentSlotPage[0].slot;
+
+
+        await loadSlot(
+            selectedSlot
+        );
+    }
+);
+
+
+goSlotButton.addEventListener(
+    "click",
+    goToSlot
+);
+
+
+goSlotInput.addEventListener(
+    "keydown",
+    async event => {
+        if (
+            event.key === "Enter"
+        ) {
+            await goToSlot();
+        }
+    }
+);
+
 
 setInterval(
     async () => {
@@ -1435,4 +1774,8 @@ setInterval(
 
 updateViewHelp();
 
-refresh();
+loadSlotPage(
+    "latest"
+).then(
+    () => refresh()
+);

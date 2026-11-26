@@ -245,3 +245,87 @@ class ShredDatabase:
 
     def close(self) -> None:
         self.connection.close()
+
+    def list_slots(
+    self,
+    limit: int = 100,
+    before: int | None = None,
+    after: int | None = None,
+) -> list[dict]:
+    if before is not None and after is not None:
+        raise ValueError(
+            "before and after cannot be used together"
+        )
+
+    where_clause = ""
+    parameters: list[int] = []
+
+    if before is not None:
+        where_clause = "WHERE slot < ?"
+        parameters.append(before)
+
+    elif after is not None:
+        where_clause = "WHERE slot > ?"
+        parameters.append(after)
+
+    if after is not None:
+        order = "ASC"
+    else:
+        order = "DESC"
+
+    parameters.append(limit)
+
+    rows = self.connection.execute(
+        f"""
+        SELECT
+            slot,
+            MIN(arrival_us) AS first_arrival_us,
+            MAX(arrival_us) AS last_arrival_us,
+            COUNT(*) AS arrivals,
+            COUNT(DISTINCT fec_set_index) AS fec_sets
+        FROM shred_arrivals
+        {where_clause}
+        GROUP BY slot
+        ORDER BY slot {order}
+        LIMIT ?
+        """,
+        parameters,
+    ).fetchall()
+
+    result = [
+        dict(row)
+        for row in rows
+    ]
+
+    if after is not None:
+        result.reverse()
+
+    return result
+
+
+def latest_slot(self) -> int | None:
+    row = self.connection.execute(
+        """
+        SELECT MAX(slot) AS slot
+        FROM shred_arrivals
+        """
+    ).fetchone()
+
+    if row["slot"] is None:
+        return None
+
+    return int(row["slot"])
+
+
+def latest_arrival_us(self) -> int | None:
+    row = self.connection.execute(
+        """
+        SELECT MAX(arrival_us) AS arrival_us
+        FROM shred_arrivals
+        """
+    ).fetchone()
+
+    if row["arrival_us"] is None:
+        return None
+
+    return int(row["arrival_us"])

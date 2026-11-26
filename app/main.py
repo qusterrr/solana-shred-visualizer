@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -14,78 +15,26 @@ app = FastAPI(
 )
 
 
-@app.get("/api/health")
-def health() -> dict:
-    database = ShredDatabase()
-
-    try:
-        records = database.count_records()
-
-        return {
-            "status": "ok",
-            "records": records,
-        }
-    finally:
-        database.close()
+LIVE_TIMEOUT_MS = 3000
 
 
-@app.get("/api/slots")
-def get_slots(
-    limit: int = Query(
-        default=50,
-        ge=1,
-        le=500,
-    ),
+def build_slot_response(
+    slot: int,
+    records: list[dict],
 ) -> dict:
-    database = ShredDatabase()
-
-    try:
-        slots = database.latest_slots(limit)
-
-        result = []
-
-        for slot in slots:
-            duration_ms = (
-                slot["last_arrival_us"]
-                - slot["first_arrival_us"]
-            ) / 1000
-
-            result.append(
-                {
-                    **slot,
-                    "duration_ms": round(
-                        duration_ms,
-                        3,
-                    ),
-                }
-            )
-
-        return {
-            "slots": result,
-        }
-
-    finally:
-        database.close()
-
-
-@app.get("/api/slots/{slot}")
-def get_slot(slot: int) -> dict:
-    database = ShredDatabase()
-
-    try:
-        records = database.get_slot(slot)
-
-    finally:
-        database.close()
-
     if not records:
         raise HTTPException(
             status_code=404,
             detail="Slot not found",
         )
 
-    first_arrival_us = records[0]["arrival_us"]
-    last_arrival_us = records[-1]["arrival_us"]
+    first_arrival_us = (
+        records[0]["arrival_us"]
+    )
+
+    last_arrival_us = (
+        records[-1]["arrival_us"]
+    )
 
     fec_sets = sorted(
         {
@@ -110,6 +59,7 @@ def get_slot(slot: int) -> dict:
         events.append(
             {
                 **record,
+
                 "arrival_ms": round(
                     (
                         record["arrival_us"]
@@ -123,9 +73,14 @@ def get_slot(slot: int) -> dict:
 
     return {
         "slot": slot,
-        "first_arrival_us": first_arrival_us,
-        "last_arrival_us": last_arrival_us,
-        "duration_ms": round(
+
+        "first_arrival_us":
+            first_arrival_us,
+
+        "last_arrival_us":
+            last_arrival_us,
+
+        "observed_span_ms": round(
             (
                 last_arrival_us
                 - first_arrival_us
@@ -133,13 +88,192 @@ def get_slot(slot: int) -> dict:
             / 1000,
             3,
         ),
-        "arrivals": len(records),
-        "fec_sets": fec_sets,
-        "fec_count": len(fec_sets),
-        "data_shreds": data_shreds,
-        "code_shreds": code_shreds,
-        "events": events,
+
+        "arrivals":
+            len(records),
+
+        "fec_sets":
+            fec_sets,
+
+        "fec_count":
+            len(fec_sets),
+
+        "data_shreds":
+            data_shreds,
+
+        "code_shreds":
+            code_shreds,
+
+        "events":
+            events,
     }
+
+
+@app.get("/api/health")
+def health() -> dict:
+    database = ShredDatabase()
+
+    try:
+        records = (
+            database.count_records()
+        )
+
+        last_arrival_us = (
+            database.latest_arrival_us()
+        )
+
+    finally:
+        database.close()
+
+    if last_arrival_us is None:
+        return {
+            "status": "ok",
+            "live": False,
+            "records": records,
+            "last_arrival_us": None,
+            "last_arrival_age_ms": None,
+        }
+
+    now_us = (
+        time.time_ns()
+        // 1000
+    )
+
+    age_ms = (
+        now_us
+        - last_arrival_us
+    ) / 1000
+
+    return {
+        "status": "ok",
+
+        "live":
+            age_ms
+            <= LIVE_TIMEOUT_MS,
+
+        "records":
+            records,
+
+        "last_arrival_us":
+            last_arrival_us,
+
+        "last_arrival_age_ms":
+            round(
+                age_ms,
+                1,
+            ),
+    }
+
+
+@app.get("/api/slots")
+def get_slots(
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+    ),
+
+    before: int | None = Query(
+        default=None,
+    ),
+
+    after: int | None = Query(
+        default=None,
+    ),
+) -> dict:
+    if (
+        before is not None
+        and after is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "before and after "
+                "cannot be used together"
+            ),
+        )
+
+    database = ShredDatabase()
+
+    try:
+        slots = database.list_slots(
+            limit=limit,
+            before=before,
+            after=after,
+        )
+
+    finally:
+        database.close()
+
+    result = []
+
+    for slot in slots:
+        observed_span_ms = (
+            slot["last_arrival_us"]
+            - slot["first_arrival_us"]
+        ) / 1000
+
+        result.append(
+            {
+                **slot,
+
+                "observed_span_ms":
+                    round(
+                        observed_span_ms,
+                        3,
+                    ),
+            }
+        )
+
+    return {
+        "slots": result,
+    }
+
+
+@app.get("/api/slots/{slot}")
+def get_slot(slot: int) -> dict:
+    database = ShredDatabase()
+
+    try:
+        records = (
+            database.get_slot(slot)
+        )
+
+    finally:
+        database.close()
+
+    return build_slot_response(
+        slot,
+        records,
+    )
+
+
+@app.get("/api/live")
+def get_live_slot() -> dict:
+    database = ShredDatabase()
+
+    try:
+        slot = (
+            database.latest_slot()
+        )
+
+        if slot is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No live slot available",
+            )
+
+        records = (
+            database.get_slot(slot)
+        )
+
+    finally:
+        database.close()
+
+    return build_slot_response(
+        slot,
+        records,
+    )
 
 
 STATIC_DIRECTORY = (
