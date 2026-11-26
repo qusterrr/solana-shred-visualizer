@@ -10,10 +10,11 @@ function startBrowser() {
     const requests = [];
     const plots = [];
     const elements = new Map();
+    const timers = [];
     const page = rows => ({ slots: rows.map(slot => ({ slot })) });
     const context = vm.createContext({
         console,
-        setInterval() {},
+        setInterval(callback) { timers.push(callback); },
         Plotly: { react(_chart, traces) { plots.push(traces); } },
         fetch(url) {
             return new Promise(resolve => {
@@ -46,6 +47,7 @@ function startBrowser() {
     return {
         elements,
         plots,
+        timers,
         page,
         state(expression) { return vm.runInContext(expression, context); },
         async reply(url, data) {
@@ -135,4 +137,35 @@ test("CDF and Timeline render the API analysis and Timeline retains duplicate ev
     assert.equal(timeline[0].x.join(","), "1,2");
     assert.equal(timeline[2].x.join(","), "7");
     assert.equal(timeline[2].y.join(","), "64");
+});
+
+test("an empty live store displays NO DATA", async () => {
+    const browser = startBrowser();
+    await browser.reply("/api/slots?limit=100", browser.page([]));
+    await browser.reply("/api/live", { slot: null });
+    await browser.reply("/api/health", { state: "no_data" });
+    assert.equal(browser.elements.get("connection-status").textContent, "NO DATA");
+    assert.equal(browser.state("currentData"), null);
+    assert.equal(browser.plots.length, 0);
+});
+
+test("health polling continues in history and labels the actual live slot", async () => {
+    const browser = startBrowser();
+    await browser.reply("/api/slots?limit=100", browser.page([30, 20]));
+    await browser.reply("/api/live", slotData(30));
+    await browser.reply("/api/health", { state: "live", latest_slot: 30 });
+    assert.equal(browser.elements.get("connection-status").textContent, "LIVE");
+
+    const select = browser.elements.get("slot-select");
+    select.value = "20";
+    const selection = select.change();
+    await browser.reply("/api/slots/20", slotData(20));
+    await selection;
+    assert.equal(browser.elements.get("connection-status").textContent, "LIVE · Slot 30");
+
+    const poll = browser.timers.find(callback => callback.name === "refreshHealth")();
+    await browser.reply("/api/health", { state: "lagging", latest_slot: 30 });
+    await poll;
+    assert.equal(browser.elements.get("connection-status").textContent, "INGEST LAG");
+    assert.equal(browser.state("selectedSlot"), 20);
 });

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import (
@@ -11,16 +13,30 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 
 from app.analysis import DECODE_THRESHOLD, analyze_slot
+from app.config import resolve_database_path
 from app.database import ShredDatabase
+from app.receiver_status import read_accepted_arrival
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logging.getLogger("uvicorn.error").info("API database: %s", resolve_database_path())
+    yield
 
 
 app = FastAPI(
     title="Solana Shred Visualizer",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
 LIVE_TIMEOUT_MS = 3000
+
+
+def live_window() -> tuple[int, int]:
+    now_us = time.time_ns() // 1000
+    return now_us, now_us - LIVE_TIMEOUT_MS * 1000
 
 
 def build_slot_response(
@@ -123,54 +139,38 @@ def health() -> dict:
     database = ShredDatabase()
 
     try:
-        last_arrival_us = (
-            database.latest_arrival_us()
-        )
-
-        latest_slot = (
-            database.latest_slot()
-        )
-
+        last_accepted_us = read_accepted_arrival(database.path)
+        now_us, cutoff_us = live_window()
+        observation = database.live_observation(now_us, cutoff_us)
     finally:
         database.close()
 
-    if last_arrival_us is None:
-        return {
-            "status": "ok",
-            "live": False,
-            "latest_slot": None,
-            "last_arrival_us": None,
-            "last_arrival_age_ms": None,
-        }
-
-    now_us = (
-        time.time_ns()
-        // 1000
+    latest_slot, last_arrival_us = observation if observation is not None else (None, None)
+    committed_recent = last_arrival_us is not None and last_arrival_us >= cutoff_us
+    accepted_recent = committed_recent or (
+        last_accepted_us is not None and cutoff_us <= last_accepted_us <= now_us
     )
-
-    age_ms = (
-        now_us
-        - last_arrival_us
-    ) / 1000
+    if committed_recent:
+        state = "live"
+    elif accepted_recent:
+        state = "lagging"
+    elif observation is None:
+        state = "no_data"
+    else:
+        state = "stale"
 
     return {
         "status": "ok",
-
-        "live":
-            age_ms
-            <= LIVE_TIMEOUT_MS,
-
-        "latest_slot":
-            latest_slot,
-
-        "last_arrival_us":
-            last_arrival_us,
-
-        "last_arrival_age_ms":
-            round(
-                age_ms,
-                1,
-            ),
+        "state": state,
+        "live": state == "live",
+        "accepted_recent": accepted_recent,
+        "committed_recent": committed_recent,
+        "latest_slot": latest_slot,
+        "last_arrival_us": last_arrival_us,
+        "last_arrival_age_ms": (
+            round((now_us - last_arrival_us) / 1000, 1)
+            if last_arrival_us is not None else None
+        ),
     }
 
 
@@ -262,23 +262,14 @@ def get_live_slot() -> dict:
     database = ShredDatabase()
 
     try:
-        slot = (
-            database.latest_slot()
-        )
-
-        if slot is None:
-            raise HTTPException(
-                status_code=404,
-                detail="No live slot available",
-            )
-
-        records = (
-            database.get_slot(slot)
-        )
-
+        selected = database.get_live_slot(*live_window())
     finally:
         database.close()
 
+    if selected is None:
+        return {"slot": None}
+
+    slot, records = selected
     return build_slot_response(
         slot,
         records,

@@ -87,6 +87,8 @@ let currentSlotPage = [];
 
 let requestGeneration = 0;
 let refreshingGeneration = null;
+let healthInProgress = false;
+let currentHealth = null;
 
 
 async function fetchJson(url) {
@@ -115,53 +117,38 @@ function setConnectionStatus(
 }
 
 
-async function setConnectionStatusFromHealth(generation) {
+function renderHealth() {
+    if (currentHealth === null) return;
+
+    const health = currentHealth;
+    if (health.state === "live") {
+        const label = selectedSlot !== null && selectedSlot !== health.latest_slot
+            ? `LIVE \u00b7 Slot ${health.latest_slot}`
+            : "LIVE";
+        setConnectionStatus(label, "ok");
+    } else if (health.state === "lagging") {
+        setConnectionStatus("INGEST LAG", "error");
+    } else if (health.state === "no_data") {
+        setConnectionStatus("NO DATA", "error");
+    } else {
+        setConnectionStatus(`STALE \u00b7 ${(health.last_arrival_age_ms / 1000).toFixed(1)}s`, "error");
+    }
+}
+
+
+async function refreshHealth() {
+    if (healthInProgress) return;
+
+    healthInProgress = true;
     try {
-        const health =
-            await fetchJson(
-                "/api/health"
-            );
-
-        if (generation !== requestGeneration) return;
-
-        if (health.live) {
-            setConnectionStatus(
-                "LIVE",
-                "ok"
-            );
-
-            return;
-        }
-
-        if (
-            health.last_arrival_age_ms
-            === null
-        ) {
-            setConnectionStatus(
-                "NO DATA",
-                "error"
-            );
-
-            return;
-        }
-
-        setConnectionStatus(
-            `STALE · ${(
-                health.last_arrival_age_ms
-                / 1000
-            ).toFixed(1)}s`,
-            "error"
-        );
-
+        currentHealth = await fetchJson("/api/health");
+        renderHealth();
     } catch (error) {
         console.error(error);
-
-        if (generation !== requestGeneration) return;
-
-        setConnectionStatus(
-            "OFFLINE",
-            "error"
-        );
+        currentHealth = null;
+        setConnectionStatus("OFFLINE", "error");
+    } finally {
+        healthInProgress = false;
     }
 }
 
@@ -1310,8 +1297,18 @@ function renderCurrentView() {
 function showSlot(data, generation) {
     if (generation !== requestGeneration) return;
 
+    const hadChart = currentData !== null;
     selectedSlot = data.slot;
-    currentData = data;
+    currentData = data.slot === null ? null : data;
+    renderHealth();
+    if (currentData === null) {
+        slotSelect.value = "";
+        slotTitle.textContent = "Slot \u2013";
+        slotSummary.textContent = "No data";
+        if (hadChart) Plotly.purge("chart");
+        return;
+    }
+
     ensureSlotOption(data.slot);
     slotSelect.value = String(data.slot);
     updateSummary(data);
@@ -1352,17 +1349,10 @@ async function refresh(generation = requestGeneration) {
                 : (selectedSlot ?? slots[0].slot);
             await loadSlot(slot, generation);
         }
-
-        if (generation === requestGeneration) {
-            await setConnectionStatusFromHealth(generation);
-        }
     } catch (error) {
         if (generation !== requestGeneration) return;
 
         console.error(error);
-        if (mode === "live") {
-            setConnectionStatus("ERROR", "error");
-        }
     } finally {
         if (refreshingGeneration === generation) {
             refreshingGeneration = null;
@@ -1384,9 +1374,6 @@ async function goToSlot() {
     const generation = beginHistoryRequest();
     try {
         await loadSlot(slot, generation);
-        if (generation === requestGeneration) {
-            await setConnectionStatusFromHealth(generation);
-        }
     } catch (error) {
         if (generation !== requestGeneration) return;
 
@@ -1494,7 +1481,8 @@ setInterval(
 
 
 updateViewHelp();
-
+refreshHealth();
+setInterval(refreshHealth, POLL_INTERVAL_MS);
 
 const initialGeneration = requestGeneration;
 loadSlotPage("latest", initialGeneration)

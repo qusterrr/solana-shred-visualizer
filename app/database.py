@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from app.config import resolve_database_path
 
-DEFAULT_DATABASE_PATH = Path("data/shreds.db")
 DEFAULT_RETENTION_HOURS = 48
+SQLITE_INTEGER_MIN = -(1 << 63)
+SQLITE_INTEGER_MAX = (1 << 63) - 1
+WRITE_ATTEMPTS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,13 +27,24 @@ class ShredArrival:
     version: int
     variant: int
 
+    def has_storable_integers(self) -> bool:
+        return all(
+            type(value) is int and SQLITE_INTEGER_MIN <= value <= SQLITE_INTEGER_MAX
+            for value in (
+                self.arrival_us, self.sender_port, self.packet_size, self.slot,
+                self.shred_index, self.fec_set_index, self.version, self.variant,
+            )
+        )
+
 
 class ShredDatabase:
     def __init__(
         self,
-        path: str | Path = DEFAULT_DATABASE_PATH,
+        path: str | Path | None = None,
+        *,
+        timeout: float = 5.0,
     ) -> None:
-        self.path = Path(path)
+        self.path = resolve_database_path(path)
 
         self.path.parent.mkdir(
             parents=True,
@@ -39,6 +53,7 @@ class ShredDatabase:
 
         self.connection = sqlite3.connect(
             self.path,
+            timeout=timeout,
         )
 
         self.connection.row_factory = sqlite3.Row
@@ -49,10 +64,6 @@ class ShredDatabase:
 
         self.connection.execute(
             "PRAGMA synchronous=NORMAL"
-        )
-
-        self.connection.execute(
-            "PRAGMA busy_timeout=5000"
         )
 
         self._create_schema()
@@ -123,8 +134,7 @@ class ShredDatabase:
         if not rows:
             return 0
 
-        self.connection.executemany(
-            """
+        statement = """
             INSERT INTO shred_arrivals (
                 arrival_us,
                 sender_ip,
@@ -138,13 +148,25 @@ class ShredDatabase:
                 variant
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-
-        self.connection.commit()
-
-        return len(rows)
+            """
+        for attempt in range(WRITE_ATTEMPTS):
+            try:
+                with self.connection:
+                    self.connection.executemany(statement, rows)
+                return len(rows)
+            except sqlite3.OperationalError as error:
+                name = getattr(error, "sqlite_errorname", None)
+                is_lock = (
+                    name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")) if name else
+                    str(error) in ("database is locked", "database table is locked")
+                )
+                if (
+                    not is_lock
+                    or attempt == WRITE_ATTEMPTS - 1
+                    or self.connection.in_transaction
+                ):
+                    raise
+                time.sleep(0.05)
 
     def count_records(self) -> int:
         row = self.connection.execute(
@@ -297,6 +319,41 @@ class ShredDatabase:
             for row in rows
         ]
 
+    def live_observation(self, now_us: int, cutoff_us: int) -> tuple[int, int] | None:
+        """Return the preferred live slot and its latest eligible arrival."""
+        row = self.connection.execute(
+            """
+            WITH selected AS (
+                SELECT slot, arrival_us
+                FROM shred_arrivals INDEXED BY idx_shred_arrivals_arrival_us
+                WHERE arrival_us BETWEEN ? AND ?
+                    AND shred_type IN ('data', 'code')
+                ORDER BY slot DESC, arrival_us DESC, id DESC
+                LIMIT 1
+            )
+            SELECT slot, arrival_us FROM selected
+            UNION ALL
+            SELECT slot, arrival_us FROM (
+                SELECT slot, arrival_us
+                FROM shred_arrivals
+                WHERE arrival_us < ? AND shred_type IN ('data', 'code')
+                ORDER BY arrival_us DESC, id DESC
+                LIMIT CASE WHEN EXISTS (SELECT 1 FROM selected) THEN 0 ELSE 1 END
+            )
+            """,
+            (cutoff_us, now_us, cutoff_us),
+        ).fetchone()
+        return (row["slot"], row["arrival_us"]) if row is not None else None
+
+    def get_live_slot(self, now_us: int, cutoff_us: int) -> tuple[int, list[dict]] | None:
+        with self.connection:
+            self.connection.execute("BEGIN")
+            observation = self.live_observation(now_us, cutoff_us)
+            if observation is not None:
+                slot, _ = observation
+                return slot, self.get_slot(slot)
+        return None
+
     def delete_older_than(
         self,
         hours: int = DEFAULT_RETENTION_HOURS,
@@ -309,15 +366,14 @@ class ShredDatabase:
             * 1_000_000
         )
 
-        cursor = self.connection.execute(
-            """
-            DELETE FROM shred_arrivals
-            WHERE arrival_us < ?
-            """,
-            (cutoff_us,),
-        )
-
-        self.connection.commit()
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                DELETE FROM shred_arrivals
+                WHERE arrival_us < ?
+                """,
+                (cutoff_us,),
+            )
 
         return cursor.rowcount
 
