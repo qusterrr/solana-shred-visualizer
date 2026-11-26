@@ -287,7 +287,7 @@ class ShredDatabase:
                 variant
             FROM shred_arrivals
             WHERE slot = ?
-            ORDER BY arrival_us ASC
+            ORDER BY arrival_us ASC, id ASC
             """,
             (slot,),
         ).fetchall()

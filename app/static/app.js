@@ -75,7 +75,6 @@ const DENSITY_BUCKET_MS = 10;
 
 const SLOT_REFERENCE_MS = 200;
 
-const DECODE_THRESHOLD = 32;
 
 
 let selectedSlot = null;
@@ -86,7 +85,8 @@ let currentData = null;
 
 let currentSlotPage = [];
 
-let refreshInProgress = false;
+let requestGeneration = 0;
+let refreshingGeneration = null;
 
 
 async function fetchJson(url) {
@@ -115,12 +115,14 @@ function setConnectionStatus(
 }
 
 
-async function setConnectionStatusFromHealth() {
+async function setConnectionStatusFromHealth(generation) {
     try {
         const health =
             await fetchJson(
                 "/api/health"
             );
+
+        if (generation !== requestGeneration) return;
 
         if (health.live) {
             setConnectionStatus(
@@ -153,6 +155,8 @@ async function setConnectionStatusFromHealth() {
 
     } catch (error) {
         console.error(error);
+
+        if (generation !== requestGeneration) return;
 
         setConnectionStatus(
             "OFFLINE",
@@ -281,7 +285,7 @@ function ensureSlotOption(slot) {
 
 
 async function loadSlotPage(
-    direction = "latest"
+    direction, generation
 ) {
     let url =
         "/api/slots?limit=100";
@@ -319,9 +323,7 @@ async function loadSlotPage(
     const result =
         await fetchJson(url);
 
-    if (
-        result.slots.length === 0
-    ) {
+    if (generation !== requestGeneration || result.slots.length === 0) {
         return false;
     }
 
@@ -362,116 +364,6 @@ function getFecSets(events) {
     ].sort(
         (a, b) => a - b
     );
-}
-
-
-function getUniqueShredKey(event) {
-    return (
-        `${event.shred_type}:` +
-        `${event.shred_index}`
-    );
-}
-
-
-function calculateFecStats(events) {
-    const groups =
-        new Map();
-
-    for (const event of events) {
-        if (
-            !groups.has(
-                event.fec_set_index
-            )
-        ) {
-            groups.set(
-                event.fec_set_index,
-                []
-            );
-        }
-
-        groups
-            .get(
-                event.fec_set_index
-            )
-            .push(event);
-    }
-
-    const result =
-        new Map();
-
-    for (
-        const [fec, fecEvents]
-        of groups
-    ) {
-        const sorted =
-            [...fecEvents].sort(
-                (a, b) =>
-                    a.arrival_ms
-                    - b.arrival_ms
-            );
-
-        const seen =
-            new Set();
-
-        const cumulative = [];
-
-        let decodeTime = null;
-
-        for (const event of sorted) {
-            const key =
-                getUniqueShredKey(
-                    event
-                );
-
-            if (seen.has(key)) {
-                continue;
-            }
-
-            seen.add(key);
-
-            cumulative.push(
-                {
-                    arrival_ms:
-                        event.arrival_ms,
-
-                    count:
-                        seen.size,
-
-                    event:
-                        event,
-                }
-            );
-
-            if (
-                seen.size
-                === DECODE_THRESHOLD
-            ) {
-                decodeTime =
-                    event.arrival_ms;
-            }
-        }
-
-        result.set(
-            fec,
-            {
-                fec: fec,
-
-                events:
-                    sorted,
-
-                cumulative:
-                    cumulative,
-
-                uniqueCount:
-                    seen.size,
-
-                decodeTime:
-                    decodeTime,
-            }
-        );
-    }
-
-    return result;
 }
 
 
@@ -537,16 +429,7 @@ function createReferenceAnnotation() {
 
 
 function createCdf(data) {
-    const fecStats =
-        calculateFecStats(
-            data.events
-        );
-
-    const fecSets =
-        [...fecStats.keys()].sort(
-            (a, b) => a - b
-        );
-
+    const threshold = data.decode_threshold;
     const traces = [];
 
     const colors = [
@@ -561,10 +444,9 @@ function createCdf(data) {
         "#9d9d9d",
     ];
 
-    fecSets.forEach(
-        (fec, index) => {
-            const stats =
-                fecStats.get(fec);
+    data.fec_analysis.forEach(
+        (stats, index) => {
+            const fec = stats.fec_set_index;
 
             const color =
                 colors[
@@ -582,13 +464,13 @@ function createCdf(data) {
                         `FEC ${fec}`,
 
                     x:
-                        stats.cumulative.map(
+                        stats.cumulative_unique_points.map(
                             point =>
                                 point.arrival_ms
                         ),
 
                     y:
-                        stats.cumulative.map(
+                        stats.cumulative_unique_points.map(
                             point =>
                                 point.count
                         ),
@@ -600,13 +482,11 @@ function createCdf(data) {
                     },
 
                     customdata:
-                        stats.cumulative.map(
+                        stats.cumulative_unique_points.map(
                             point => [
                                 fec,
-                                point.event
-                                    .shred_index,
-                                point.event
-                                    .shred_type,
+                                point.shred_index,
+                                point.shred_type,
                             ]
                         ),
 
@@ -621,7 +501,7 @@ function createCdf(data) {
             );
 
             if (
-                stats.decodeTime
+                stats.decode_time_ms
                 !== null
             ) {
                 traces.push(
@@ -636,11 +516,11 @@ function createCdf(data) {
                         showlegend: false,
 
                         x: [
-                            stats.decodeTime
+                            stats.decode_time_ms
                         ],
 
                         y: [
-                            DECODE_THRESHOLD
+                            threshold
                         ],
 
                         customdata: [
@@ -665,7 +545,7 @@ function createCdf(data) {
                             "<b>FEC decodable</b>" +
                             "<br>FEC set index: %{customdata[0]}" +
                             "<br>Time: %{x:.2f} ms" +
-                            "<br>Unique shreds: 32" +
+                            `<br>Unique shreds: ${threshold}` +
                             "<extra></extra>",
                     }
                 );
@@ -675,13 +555,11 @@ function createCdf(data) {
 
     const maximumUnique =
         Math.max(
-            DECODE_THRESHOLD + 4,
+            threshold + 4,
 
-            ...[
-                ...fecStats.values()
-            ].map(
+            ...data.fec_analysis.map(
                 stats =>
-                    stats.uniqueCount
+                    stats.unique_recognized_shred_count
             )
         );
 
@@ -777,10 +655,10 @@ function createCdf(data) {
                 xref: "paper",
 
                 y0:
-                    DECODE_THRESHOLD,
+                    threshold,
 
                 y1:
-                    DECODE_THRESHOLD,
+                    threshold,
 
                 line: {
                     color: "#737b85",
@@ -796,13 +674,13 @@ function createCdf(data) {
             {
                 x: 1,
                 y:
-                    DECODE_THRESHOLD,
+                    threshold,
 
                 xref: "paper",
                 yref: "y",
 
                 text:
-                    "decode threshold (32)",
+                    `decode threshold (${threshold})`,
 
                 showarrow: false,
 
@@ -840,9 +718,6 @@ function createTimeline(data) {
 
     const fecSets =
         getFecSets(events);
-
-    const fecStats =
-        calculateFecStats(events);
 
     const dataEvents =
         events.filter(
@@ -958,19 +833,17 @@ function createTimeline(data) {
     const decodeY = [];
     const decodeCustom = [];
 
-    for (
-        const [fec, stats]
-        of fecStats
-    ) {
+    for (const stats of data.fec_analysis) {
+        const fec = stats.fec_set_index;
         if (
-            stats.decodeTime
+            stats.decode_time_ms
             === null
         ) {
             continue;
         }
 
         decodeX.push(
-            stats.decodeTime
+            stats.decode_time_ms
         );
 
         decodeY.push(
@@ -980,7 +853,7 @@ function createTimeline(data) {
         decodeCustom.push(
             [
                 fec,
-                stats.uniqueCount,
+                stats.unique_recognized_shred_count,
             ]
         );
     }
@@ -1017,7 +890,7 @@ function createTimeline(data) {
             "<b>FEC decodable</b>" +
             "<br>FEC set index: %{customdata[0]}" +
             "<br>Time: %{x:.2f} ms" +
-            "<br>Threshold: 32 unique shreds" +
+            `<br>Threshold: ${data.decode_threshold} unique shreds` +
             "<extra></extra>",
     };
 
@@ -1434,219 +1307,107 @@ function renderCurrentView() {
 }
 
 
-async function loadSlot(slot) {
-    const data =
-        await fetchJson(
-            `/api/slots/${slot}`
-        );
+function showSlot(data, generation) {
+    if (generation !== requestGeneration) return;
 
-    selectedSlot =
-        data.slot;
-
-    currentData =
-        data;
-
-    ensureSlotOption(
-        data.slot
-    );
-
-    slotSelect.value =
-        String(data.slot);
-
+    selectedSlot = data.slot;
+    currentData = data;
+    ensureSlotOption(data.slot);
+    slotSelect.value = String(data.slot);
     updateSummary(data);
-
     renderCurrentView();
 }
 
 
-async function refreshLive() {
-    if (refreshInProgress) {
-        return;
-    }
+async function loadSlot(slot, generation) {
+    const data = await fetchJson(`/api/slots/${slot}`);
+    showSlot(data, generation);
+}
 
-    refreshInProgress = true;
+
+async function refresh(generation = requestGeneration) {
+    if (generation !== requestGeneration || refreshingGeneration === generation) return;
+
+    const mode = autoModeSelect.value;
+    refreshingGeneration = generation;
 
     try {
-        const data =
-            await fetchJson(
-                "/api/live"
-            );
+        if (mode === "live") {
+            const data = await fetchJson("/api/live");
+            showSlot(data, generation);
+        } else {
+            if (currentSlotPage.length === 0) {
+                await loadSlotPage("latest", generation);
+            }
 
-        selectedSlot =
-            data.slot;
+            if (generation !== requestGeneration) return;
 
-        currentData =
-            data;
+            const slots = currentSlotPage;
+            if (slots.length === 0) {
+                throw new Error("No slots available");
+            }
 
-        ensureSlotOption(
-            data.slot
-        );
+            const slot = mode === "previous"
+                ? (slots[1] ?? slots[0]).slot
+                : (selectedSlot ?? slots[0].slot);
+            await loadSlot(slot, generation);
+        }
 
-        slotSelect.value =
-            String(data.slot);
-
-        updateSummary(data);
-
-        renderCurrentView();
-
-        await (
-            setConnectionStatusFromHealth()
-        );
-
+        if (generation === requestGeneration) {
+            await setConnectionStatusFromHealth(generation);
+        }
     } catch (error) {
+        if (generation !== requestGeneration) return;
+
         console.error(error);
-
-        setConnectionStatus(
-            "ERROR",
-            "error"
-        );
-
+        if (mode === "live") {
+            setConnectionStatus("ERROR", "error");
+        }
     } finally {
-        refreshInProgress = false;
+        if (refreshingGeneration === generation) {
+            refreshingGeneration = null;
+        }
     }
 }
 
 
-async function refresh() {
-    if (
-        autoModeSelect.value
-        === "live"
-    ) {
-        await refreshLive();
-
-        return;
-    }
-
-    if (refreshInProgress) {
-        return;
-    }
-
-    refreshInProgress = true;
-
-    try {
-        if (
-            currentSlotPage.length
-            === 0
-        ) {
-            await loadSlotPage(
-                "latest"
-            );
-        }
-
-        const slots =
-            currentSlotPage;
-
-        if (slots.length === 0) {
-            throw new Error(
-                "No slots available"
-            );
-        }
-
-        if (
-            autoModeSelect.value
-            === "previous"
-        ) {
-            selectedSlot =
-                slots.length > 1
-                    ? slots[1].slot
-                    : slots[0].slot;
-        }
-
-        if (
-            selectedSlot === null
-        ) {
-            selectedSlot =
-                slots[0].slot;
-        }
-
-        await loadSlot(
-            selectedSlot
-        );
-
-        await (
-            setConnectionStatusFromHealth()
-        );
-
-    } catch (error) {
-        console.error(error);
-
-    } finally {
-        refreshInProgress = false;
-    }
+function beginHistoryRequest() {
+    autoModeSelect.value = "off";
+    return ++requestGeneration;
 }
 
 
 async function goToSlot() {
-    const slot =
-        Number(
-            goSlotInput.value
-        );
+    const slot = Number(goSlotInput.value);
+    if (!Number.isInteger(slot) || slot < 0) return;
 
-    if (
-        !Number.isInteger(slot)
-        || slot < 0
-    ) {
-        return;
-    }
-
+    const generation = beginHistoryRequest();
     try {
-        autoModeSelect.value =
-            "off";
-
-        ensureSlotOption(
-            slot
-        );
-
-        await loadSlot(
-            slot
-        );
-
-        await (
-            setConnectionStatusFromHealth()
-        );
-
+        await loadSlot(slot, generation);
+        if (generation === requestGeneration) {
+            await setConnectionStatusFromHealth(generation);
+        }
     } catch (error) {
-        console.error(error);
+        if (generation !== requestGeneration) return;
 
-        alert(
-            `Slot ${slot} was not found in retained history.`
-        );
+        console.error(error);
+        alert(`Slot ${slot} was not found in retained history.`);
     }
 }
 
 
-slotSelect.addEventListener(
-    "change",
-    async () => {
-        autoModeSelect.value =
-            "off";
-
-        selectedSlot =
-            Number(
-                slotSelect.value
-            );
-
-        await loadSlot(
-            selectedSlot
-        );
+slotSelect.addEventListener("change", async () => {
+    const generation = beginHistoryRequest();
+    try {
+        await loadSlot(Number(slotSelect.value), generation);
+    } catch (error) {
+        if (generation === requestGeneration) console.error(error);
     }
-);
+});
 
 
-autoModeSelect.addEventListener(
-    "change",
-    async () => {
-        await refresh();
-    }
-);
-
-
-refreshButton.addEventListener(
-    "click",
-    async () => {
-        await refresh();
-    }
-);
+autoModeSelect.addEventListener("change", () => refresh(++requestGeneration));
+refreshButton.addEventListener("click", () => refresh(++requestGeneration));
 
 
 cdfButton.addEventListener(
@@ -1679,58 +1440,24 @@ densityButton.addEventListener(
 );
 
 
-olderButton.addEventListener(
-    "click",
-    async () => {
-        autoModeSelect.value =
-            "off";
+async function navigateHistory(direction) {
+    const generation = beginHistoryRequest();
+    try {
+        const loaded = await loadSlotPage(direction, generation);
+        if (!loaded || generation !== requestGeneration) return;
 
-        const loaded =
-            await loadSlotPage(
-                "older"
-            );
-
-        if (!loaded) {
-            return;
-        }
-
-        selectedSlot =
-            currentSlotPage[0]
-                .slot;
-
-        await loadSlot(
-            selectedSlot
-        );
+        const item = direction === "older"
+            ? currentSlotPage[0]
+            : currentSlotPage.at(-1);
+        await loadSlot(item.slot, generation);
+    } catch (error) {
+        if (generation === requestGeneration) console.error(error);
     }
-);
+}
 
 
-newerButton.addEventListener(
-    "click",
-    async () => {
-        autoModeSelect.value =
-            "off";
-
-        const loaded =
-            await loadSlotPage(
-                "newer"
-            );
-
-        if (!loaded) {
-            return;
-        }
-
-        selectedSlot =
-            currentSlotPage[
-                currentSlotPage.length
-                - 1
-            ].slot;
-
-        await loadSlot(
-            selectedSlot
-        );
-    }
-);
+olderButton.addEventListener("click", () => navigateHistory("older"));
+newerButton.addEventListener("click", () => navigateHistory("newer"));
 
 
 goSlotButton.addEventListener(
@@ -1769,10 +1496,9 @@ setInterval(
 updateViewHelp();
 
 
-loadSlotPage(
-    "latest"
-).then(
-    async () => {
-        await refresh();
-    }
-);
+const initialGeneration = requestGeneration;
+loadSlotPage("latest", initialGeneration)
+    .then(() => refresh(initialGeneration))
+    .catch(error => {
+        if (initialGeneration === requestGeneration) console.error(error);
+    });

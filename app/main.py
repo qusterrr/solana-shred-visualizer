@@ -10,6 +10,7 @@ from fastapi import (
 )
 from fastapi.staticfiles import StaticFiles
 
+from app.analysis import DECODE_THRESHOLD, analyze_slot
 from app.database import ShredDatabase
 
 
@@ -33,11 +34,11 @@ def build_slot_response(
         )
 
     first_arrival_us = (
-        records[0]["arrival_us"]
+        min(record["arrival_us"] for record in records)
     )
 
     last_arrival_us = (
-        records[-1]["arrival_us"]
+        max(record["arrival_us"] for record in records)
     )
 
     fec_sets = sorted(
@@ -111,6 +112,9 @@ def build_slot_response(
 
         "events":
             events,
+
+        "decode_threshold": DECODE_THRESHOLD,
+        "fec_analysis": analyze_slot(slot, events),
     }
 
 
