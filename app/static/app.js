@@ -48,6 +48,12 @@ const goSlotButton =
         "go-slot-button"
     );
 
+const observedTimeInput = document.getElementById("observed-time-input");
+const goTimeButton = document.getElementById("go-time-button");
+const slotObservedTime = document.getElementById("slot-observed-time");
+const navigationStatus = document.getElementById("navigation-status");
+const historyPageStatus = document.getElementById("history-page-status");
+
 const connectionStatus =
     document.getElementById(
         "connection-status"
@@ -72,6 +78,8 @@ const viewHelp =
 const POLL_INTERVAL_MS = 500;
 
 const DENSITY_BUCKET_MS = 10;
+const MAX_DENSITY_BUCKETS = 1024;
+const MAX_DENSITY_CELLS = 262144;
 
 const SLOT_REFERENCE_MS = 200;
 
@@ -83,7 +91,8 @@ let currentView = "cdf";
 
 let currentData = null;
 
-let currentSlotPage = [];
+let historyPage = { slots: [], oldest_slot: null, newest_slot: null };
+let outsidePageKey = null;
 
 let requestGeneration = 0;
 let refreshingGeneration = null;
@@ -96,9 +105,9 @@ async function fetchJson(url) {
         await fetch(url);
 
     if (!response.ok) {
-        throw new Error(
-            `${response.status} ${response.statusText}`
-        );
+        const error = new Error(`HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
     }
 
     return await response.json();
@@ -197,137 +206,91 @@ function updateViewHelp() {
     }
 
     viewHelp.textContent =
-        "Density groups arrivals into 10 ms buckets. Color intensity represents the number of arrivals in each bucket.";
+        "Density groups arrivals into time buckets. Long spans use wider buckets.";
 }
 
 
-function updateSlotOptions(slots) {
-    const available =
-        new Set(
-            slots.map(
-                item => item.slot
-            )
-        );
-
-    slotSelect.innerHTML = "";
-
-    for (const item of slots) {
-        const option =
-            document.createElement(
-                "option"
-            );
-
-        option.value =
-            String(item.slot);
-
-        option.textContent =
-            `Slot ${item.slot}`;
-
-        slotSelect.appendChild(
-            option
-        );
-    }
-
-    if (
-        selectedSlot !== null
-        && available.has(
-            selectedSlot
-        )
-    ) {
-        slotSelect.value =
-            String(selectedSlot);
-    }
+function formatObservedTime(arrivalUs) {
+    const date = new Date(Math.floor(arrivalUs / 1000));
+    return Number.isFinite(date.getTime())
+        ? date.toISOString().replace("T", " ").replace("Z", " UTC")
+        : "Unavailable";
 }
 
 
-function ensureSlotOption(slot) {
-    const exists =
-        [...slotSelect.options]
-            .some(
-                option =>
-                    Number(
-                        option.value
-                    ) === slot
-            );
+function updateSlotOptions(pageChanged = false) {
+    const slots = historyPage.slots;
+    const outsidePage = currentData !== null && !slots.some(item => item.slot === currentData.slot);
+    const key = outsidePage ? `${currentData.slot}:${currentData.first_arrival_us}` : null;
+    if (pageChanged || key !== outsidePageKey) {
+        outsidePageKey = key;
+        slotSelect.innerHTML = "";
+        for (const item of outsidePage ? [currentData, ...slots] : slots) {
+            const option = document.createElement("option");
+            option.value = String(item.slot);
+            option.textContent = `Slot ${item.slot} | ${formatObservedTime(item.first_arrival_us)}`;
+            slotSelect.appendChild(option);
+        }
+    }
+    slotSelect.value = currentData === null ? "" : String(currentData.slot);
+}
 
-    if (exists) {
+
+function showHistoryPage(page) {
+    historyPage = page;
+    updateSlotOptions(true);
+    if (page.slots.length === 0) {
+        historyPageStatus.textContent = "No retained slots in history.";
         return;
     }
 
-    const option =
-        document.createElement(
-            "option"
-        );
-
-    option.value =
-        String(slot);
-
-    option.textContent =
-        `Slot ${slot}`;
-
-    slotSelect.prepend(
-        option
-    );
+    const boundaries = [];
+    if (!page.has_older) boundaries.push("No older slots");
+    if (!page.has_newer) boundaries.push("No newer slots at last check");
+    historyPageStatus.textContent = [
+        `History slots ${page.oldest_slot} to ${page.newest_slot}`, ...boundaries,
+    ].join(" | ");
 }
 
 
-async function loadSlotPage(
-    direction, generation
-) {
-    let url =
-        "/api/slots?limit=100";
+function fetchPage(cursor = "") {
+    return fetchJson(`/api/slots?limit=100${cursor}`);
+}
 
-    if (
-        direction === "older"
-        && currentSlotPage.length > 0
-    ) {
-        const oldestSlot =
-            Math.min(
-                ...currentSlotPage.map(
-                    item => item.slot
-                )
-            );
 
-        url +=
-            `&before=${oldestSlot}`;
+async function reloadHistoryPage() {
+    const anchor = historyPage.newest_slot;
+    const page = await fetchPage(anchor === null ? "" : `&at=${anchor}`);
+    return page.slots.length === 0 && anchor !== null ? fetchPage() : page;
+}
+
+
+async function recoverHistoryPage(generation, replacement = null) {
+    const displayed = selectedSlot;
+    const wasInPage = historyPage.slots.some(item => item.slot === displayed);
+    const page = replacement ?? await reloadHistoryPage();
+    if (generation !== requestGeneration) return null;
+
+    showHistoryPage(page);
+    if (!page.slots.length) {
+        showSlot({ slot: null });
+    } else if (wasInPage && !page.slots.some(item => item.slot === displayed)) {
+        try {
+            await fetchJson(`/api/slots/${displayed}`);
+        } catch (error) {
+            if (generation !== requestGeneration) return null;
+            if (error.status !== 404) throw error;
+            showSlot({ slot: null });
+        }
     }
-
-    if (
-        direction === "newer"
-        && currentSlotPage.length > 0
-    ) {
-        const newestSlot =
-            Math.max(
-                ...currentSlotPage.map(
-                    item => item.slot
-                )
-            );
-
-        url +=
-            `&after=${newestSlot}`;
-    }
-
-    const result =
-        await fetchJson(url);
-
-    if (generation !== requestGeneration || result.slots.length === 0) {
-        return false;
-    }
-
-    currentSlotPage =
-        result.slots;
-
-    updateSlotOptions(
-        currentSlotPage
-    );
-
-    return true;
+    return generation === requestGeneration ? page : null;
 }
 
 
 function updateSummary(data) {
     slotTitle.textContent =
         `Slot ${data.slot}`;
+    slotObservedTime.textContent = `Observed time ${formatObservedTime(data.first_arrival_us)}`;
 
     slotSummary.textContent =
         [
@@ -418,6 +381,7 @@ function createReferenceAnnotation() {
 function createCdf(data) {
     const threshold = data.decode_threshold;
     const traces = [];
+    const range = getTimelineRange(data);
 
     const colors = [
         "#5b8def",
@@ -434,6 +398,14 @@ function createCdf(data) {
     data.fec_analysis.forEach(
         (stats, index) => {
             const fec = stats.fec_set_index;
+            const points = stats.cumulative_unique_points;
+            if (!points.length) return;
+
+            const last = points.at(-1);
+            const cumulativeHover = "<b>FEC set index %{customdata[0]}</b>" +
+                "<br>Time: %{x:.2f} ms<br>Unique shreds: %{y}";
+            const arrivalHover = cumulativeHover +
+                "<br>Index: %{customdata[1]}<br>Type: %{customdata[2]}<extra></extra>";
 
             const color =
                 colors[
@@ -450,17 +422,8 @@ function createCdf(data) {
                     name:
                         `FEC ${fec}`,
 
-                    x:
-                        stats.cumulative_unique_points.map(
-                            point =>
-                                point.arrival_ms
-                        ),
-
-                    y:
-                        stats.cumulative_unique_points.map(
-                            point =>
-                                point.count
-                        ),
+                    x: [...points.map(point => point.arrival_ms), range[1]],
+                    y: [...points.map(point => point.count), last.count],
 
                     line: {
                         color: color,
@@ -468,22 +431,14 @@ function createCdf(data) {
                         shape: "hv",
                     },
 
-                    customdata:
-                        stats.cumulative_unique_points.map(
-                            point => [
-                                fec,
-                                point.shred_index,
-                                point.shred_type,
-                            ]
-                        ),
-
-                    hovertemplate:
-                        "<b>FEC set index %{customdata[0]}</b>" +
-                        "<br>Arrival: %{x:.2f} ms" +
-                        "<br>Unique shreds: %{y}" +
-                        "<br>Index: %{customdata[1]}" +
-                        "<br>Type: %{customdata[2]}" +
-                        "<extra></extra>",
+                    customdata: [
+                        ...points.map(point => [fec, point.shred_index, point.shred_type]),
+                        [fec],
+                    ],
+                    hovertemplate: [
+                        ...points.map(() => arrivalHover),
+                        cumulativeHover + "<extra></extra>",
+                    ],
                 }
             );
 
@@ -588,8 +543,7 @@ function createCdf(data) {
             title:
                 "Time since first shred (ms)",
 
-            range:
-                getTimelineRange(data),
+            range: range,
 
             gridcolor:
                 "#1f252c",
@@ -1029,18 +983,14 @@ function createDensity(data) {
             data.observed_span_ms
         );
 
-    const chartEnd =
-        Math.ceil(
-            maximum
-            / DENSITY_BUCKET_MS
-        )
-        * DENSITY_BUCKET_MS;
-
-    const bucketCount =
-        Math.floor(
-            chartEnd
-            / DENSITY_BUCKET_MS
-        ) + 1;
+    const bucketLimit = Math.max(1, Math.min(
+        MAX_DENSITY_BUCKETS, Math.floor(MAX_DENSITY_CELLS / Math.max(1, fecSets.length)),
+    ));
+    const bucketMs = Math.max(
+        DENSITY_BUCKET_MS,
+        Math.ceil(maximum / bucketLimit / DENSITY_BUCKET_MS) * DENSITY_BUCKET_MS,
+    );
+    const bucketCount = Math.min(bucketLimit, Math.floor(maximum / bucketMs) + 1);
 
     const x =
         Array.from(
@@ -1051,7 +1001,7 @@ function createDensity(data) {
 
             (_, index) =>
                 index
-                * DENSITY_BUCKET_MS
+                * bucketMs + bucketMs / 2
         );
 
     const fecMap =
@@ -1084,7 +1034,7 @@ function createDensity(data) {
             Math.min(
                 Math.floor(
                     event.arrival_ms
-                    / DENSITY_BUCKET_MS
+                    / bucketMs
                 ),
 
                 bucketCount - 1
@@ -1174,7 +1124,8 @@ function createDensity(data) {
 
         hovertemplate:
             "FEC set index %{y}" +
-            "<br>Time %{x} ms" +
+            "<br>Bucket center %{x} ms" +
+            `<br>Bucket width ${bucketMs} ms` +
             "<br>Arrivals %{z}" +
             "<extra></extra>",
     };
@@ -1200,6 +1151,8 @@ function createDensity(data) {
         xaxis: {
             title:
                 "Time since first shred (ms)",
+
+            range: [0, Math.max(SLOT_REFERENCE_MS + 20, bucketCount * bucketMs)],
 
             gridcolor:
                 "#1f252c",
@@ -1294,31 +1247,63 @@ function renderCurrentView() {
 }
 
 
-function showSlot(data, generation) {
-    if (generation !== requestGeneration) return;
-
+function showSlot(data) {
     const hadChart = currentData !== null;
     selectedSlot = data.slot;
     currentData = data.slot === null ? null : data;
     renderHealth();
+    updateSlotOptions();
     if (currentData === null) {
-        slotSelect.value = "";
         slotTitle.textContent = "Slot \u2013";
         slotSummary.textContent = "No data";
+        slotObservedTime.textContent = "";
         if (hadChart) Plotly.purge("chart");
         return;
     }
 
-    ensureSlotOption(data.slot);
-    slotSelect.value = String(data.slot);
     updateSummary(data);
     renderCurrentView();
 }
 
 
-async function loadSlot(slot, generation) {
-    const data = await fetchJson(`/api/slots/${slot}`);
-    showSlot(data, generation);
+function showRequestError(error) {
+    console.error(error);
+    navigationStatus.textContent = "Unable to load data from the API. Try again.";
+}
+
+
+async function handleSlotError(error, slot, generation) {
+    if (generation !== requestGeneration) return;
+    if (error.status !== 404) {
+        showRequestError(error);
+        return;
+    }
+
+    const knownSlot = selectedSlot === slot || historyPage.slots.some(item => item.slot === slot);
+    navigationStatus.textContent = knownSlot
+        ? `Slot ${slot} is no longer retained.`
+        : `Slot ${slot} was not found in retained history.`;
+    if (selectedSlot === slot) showSlot({ slot: null });
+    if (!knownSlot) return;
+
+    try {
+        const page = await reloadHistoryPage();
+        if (generation === requestGeneration) showHistoryPage(page);
+    } catch (pageError) {
+        if (generation === requestGeneration) console.error(pageError);
+    }
+}
+
+
+async function selectSlot(slot, generation) {
+    try {
+        const data = await fetchJson(`/api/slots/${slot}`);
+        if (generation !== requestGeneration) return;
+        showSlot(data);
+        navigationStatus.textContent = "";
+    } catch (error) {
+        await handleSlotError(error, slot, generation);
+    }
 }
 
 
@@ -1329,67 +1314,110 @@ async function refresh(generation = requestGeneration) {
     refreshingGeneration = generation;
 
     try {
-        if (mode === "live") {
-            const data = await fetchJson("/api/live");
-            showSlot(data, generation);
-        } else {
-            if (currentSlotPage.length === 0) {
-                await loadSlotPage("latest", generation);
-            }
-
+        if (mode !== "off") {
+            const data = await fetchJson(mode === "live" ? "/api/live" : "/api/previous");
             if (generation !== requestGeneration) return;
-
-            const slots = currentSlotPage;
-            if (slots.length === 0) {
-                throw new Error("No slots available");
+            showSlot(data);
+            navigationStatus.textContent = data.slot === null
+                ? (mode === "live" ? "No eligible live slot." : "No previous observed slot.")
+                : "";
+            if (data.slot !== null && !historyPage.slots.length) {
+                const page = await fetchPage();
+                if (generation === requestGeneration) showHistoryPage(page);
             }
+            return;
+        }
 
-            const slot = mode === "previous"
-                ? (slots[1] ?? slots[0]).slot
-                : (selectedSlot ?? slots[0].slot);
-            await loadSlot(slot, generation);
+        if (selectedSlot !== null) {
+            await selectSlot(selectedSlot, generation);
+            return;
+        }
+
+        const page = await fetchPage();
+        if (generation !== requestGeneration) return;
+        showHistoryPage(page);
+        if (page.slots.length) {
+            await selectSlot(page.newest_slot, generation);
+        } else {
+            navigationStatus.textContent = "No retained slots.";
         }
     } catch (error) {
-        if (generation !== requestGeneration) return;
-
-        console.error(error);
+        if (generation === requestGeneration) showRequestError(error);
     } finally {
-        if (refreshingGeneration === generation) {
-            refreshingGeneration = null;
-        }
+        if (refreshingGeneration === generation) refreshingGeneration = null;
     }
 }
 
 
 function beginHistoryRequest() {
     autoModeSelect.value = "off";
+    updateSlotOptions();
     return ++requestGeneration;
 }
 
 
-async function goToSlot() {
-    const slot = Number(goSlotInput.value);
-    if (!Number.isInteger(slot) || slot < 0) return;
-
+function goToSlot() {
     const generation = beginHistoryRequest();
+    const input = goSlotInput.value.trim();
+    const slot = Number(input);
+    if (!/^\d+$/.test(input) || !Number.isSafeInteger(slot)) {
+        navigationStatus.textContent = "Enter a valid whole slot number.";
+        return;
+    }
+    return selectSlot(slot, generation);
+}
+
+
+async function goToObservedTime() {
+    const generation = beginHistoryRequest();
+    const timestamp = new Date(`${observedTimeInput.value}Z`);
+    if (!observedTimeInput.value || !Number.isFinite(timestamp.getTime())) {
+        navigationStatus.textContent = "Enter a valid observed date and time in UTC.";
+        return;
+    }
+
+    let match;
     try {
-        await loadSlot(slot, generation);
+        const query = encodeURIComponent(timestamp.toISOString());
+        ({ match } = await fetchJson(`/api/slots/nearest?observed_at=${query}`));
+        if (generation !== requestGeneration) return;
+        if (!match) {
+            navigationStatus.textContent = "No retained data for this time search.";
+            return;
+        }
+
+        const [data, page] = await Promise.all([
+            fetchJson(`/api/slots/${match.slot}`),
+            fetchPage(`&at=${match.slot}`),
+        ]);
+        if (generation !== requestGeneration) return;
+        if (page.newest_slot !== match.slot) {
+            if (selectedSlot === match.slot) showSlot({ slot: null });
+            showHistoryPage(page);
+            navigationStatus.textContent = "The matched slot is no longer retained.";
+            return;
+        }
+        showSlot(data);
+        showHistoryPage(page);
+        const distance = Math.abs(match.difference_us) / 1000;
+        const outsideRange = match.range === "within" ? "" : "Requested time is outside retained history. ";
+        navigationStatus.textContent = `${outsideRange}Closest observed slot is ${distance.toLocaleString()} ms away.`;
     } catch (error) {
         if (generation !== requestGeneration) return;
-
-        console.error(error);
-        alert(`Slot ${slot} was not found in retained history.`);
+        if (match && error.status === 404) {
+            if (selectedSlot === match.slot) showSlot({ slot: null });
+            navigationStatus.textContent = "The matched slot is no longer retained.";
+        } else {
+            showRequestError(error);
+        }
     }
 }
 
 
-slotSelect.addEventListener("change", async () => {
-    const generation = beginHistoryRequest();
-    try {
-        await loadSlot(Number(slotSelect.value), generation);
-    } catch (error) {
-        if (generation === requestGeneration) console.error(error);
-    }
+slotSelect.addEventListener("change", () => {
+    const target = slotSelect.value;
+    if (!target) return;
+    return selectSlot(Number(target), beginHistoryRequest());
 });
 
 
@@ -1429,16 +1457,37 @@ densityButton.addEventListener(
 
 async function navigateHistory(direction) {
     const generation = beginHistoryRequest();
-    try {
-        const loaded = await loadSlotPage(direction, generation);
-        if (!loaded || generation !== requestGeneration) return;
+    const boundary = direction === "older" ? historyPage.oldest_slot : historyPage.newest_slot;
+    const cursor = direction === "older" ? "before" : "after";
 
-        const item = direction === "older"
-            ? currentSlotPage[0]
-            : currentSlotPage.at(-1);
-        await loadSlot(item.slot, generation);
+    try {
+        const page = await fetchPage(boundary === null ? "" : `&${cursor}=${boundary}`);
+        if (generation !== requestGeneration) return;
+        if (!page.slots.length) {
+            const replacement = await recoverHistoryPage(generation, boundary === null ? page : null);
+            if (replacement === null) return;
+            navigationStatus.textContent = replacement.slots.length
+                ? `No ${direction} retained slots.`
+                : "No retained slots. The history page may have expired.";
+            return;
+        }
+
+        const target = direction === "older" ? page.newest_slot : page.oldest_slot;
+        try {
+            const data = await fetchJson(`/api/slots/${target}`);
+            if (generation !== requestGeneration) return;
+            showSlot(data);
+            showHistoryPage(page);
+            navigationStatus.textContent = "";
+        } catch (error) {
+            if (generation !== requestGeneration) return;
+            if (error.status !== 404) throw error;
+
+            if (await recoverHistoryPage(generation) === null) return;
+            navigationStatus.textContent = `Slot ${target} is no longer retained. History has been refreshed.`;
+        }
     } catch (error) {
-        if (generation === requestGeneration) console.error(error);
+        if (generation === requestGeneration) showRequestError(error);
     }
 }
 
@@ -1446,24 +1495,14 @@ async function navigateHistory(direction) {
 olderButton.addEventListener("click", () => navigateHistory("older"));
 newerButton.addEventListener("click", () => navigateHistory("newer"));
 
-
-goSlotButton.addEventListener(
-    "click",
-    goToSlot
-);
-
-
-goSlotInput.addEventListener(
-    "keydown",
-    async event => {
-        if (
-            event.key
-            === "Enter"
-        ) {
-            await goToSlot();
-        }
-    }
-);
+goSlotButton.addEventListener("click", goToSlot);
+goTimeButton.addEventListener("click", goToObservedTime);
+goSlotInput.addEventListener("keydown", event => {
+    if (event.key === "Enter") return goToSlot();
+});
+observedTimeInput.addEventListener("keydown", event => {
+    if (event.key === "Enter") return goToObservedTime();
+});
 
 
 setInterval(
@@ -1485,8 +1524,11 @@ refreshHealth();
 setInterval(refreshHealth, POLL_INTERVAL_MS);
 
 const initialGeneration = requestGeneration;
-loadSlotPage("latest", initialGeneration)
-    .then(() => refresh(initialGeneration))
+fetchPage()
+    .then(page => {
+        if (initialGeneration === requestGeneration) showHistoryPage(page);
+    })
     .catch(error => {
-        if (initialGeneration === requestGeneration) console.error(error);
-    });
+        if (initialGeneration === requestGeneration) showRequestError(error);
+    })
+    .then(() => refresh(initialGeneration));

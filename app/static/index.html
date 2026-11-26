@@ -152,6 +152,20 @@
 
         <div class="control">
 
+            <label for="observed-time-input">
+                OBSERVED TIME (UTC)
+            </label>
+
+            <div class="go-to-time">
+                <input id="observed-time-input" type="datetime-local" step="1">
+                <button id="go-time-button" type="button">Find</button>
+            </div>
+
+        </div>
+
+
+        <div class="control">
+
             <label for="go-slot-input">
                 GO TO SLOT
             </label>
@@ -187,12 +201,16 @@
 
     </section>
 
+    <p id="history-page-status" class="history-status"></p>
+    <p id="navigation-status" class="history-status" role="status"></p>
 
     <section class="slot-info">
 
         <strong id="slot-title">
             Slot –
         </strong>
+
+        <span id="slot-observed-time"></span>
 
         <span id="slot-summary">
             No data

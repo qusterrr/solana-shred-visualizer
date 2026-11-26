@@ -3,18 +3,21 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import (
     FastAPI,
     HTTPException,
+    Path as PathParam,
     Query,
 )
 from fastapi.staticfiles import StaticFiles
 
 from app.analysis import DECODE_THRESHOLD, analyze_slot
 from app.config import resolve_database_path
-from app.database import ShredDatabase
+from app.database import SQLITE_INTEGER_MAX, ShredDatabase
 from app.receiver_status import read_accepted_arrival
 
 
@@ -32,6 +35,7 @@ app = FastAPI(
 
 
 LIVE_TIMEOUT_MS = 3000
+SlotCursor = Annotated[int | None, Query(ge=0, le=SQLITE_INTEGER_MAX)]
 
 
 def live_window() -> tuple[int, int]:
@@ -176,71 +180,50 @@ def health() -> dict:
 
 @app.get("/api/slots")
 def get_slots(
-    limit: int = Query(
-        default=100,
-        ge=1,
-        le=500,
-    ),
-
-    before: int | None = Query(
-        default=None,
-    ),
-
-    after: int | None = Query(
-        default=None,
-    ),
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    before: SlotCursor = None,
+    after: SlotCursor = None,
+    at: SlotCursor = None,
 ) -> dict:
-    if (
-        before is not None
-        and after is not None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "before and after "
-                "cannot be used together"
-            ),
-        )
+    if sum(cursor is not None for cursor in (before, after, at)) > 1:
+        raise HTTPException(status_code=400, detail="Use only one history cursor")
 
     database = ShredDatabase()
 
     try:
-        slots = database.list_slots(
-            limit=limit,
-            before=before,
-            after=after,
-        )
+        page = database.slot_page(limit, before, after, at)
 
     finally:
         database.close()
 
-    result = []
-
-    for slot in slots:
-        observed_span_ms = (
-            slot["last_arrival_us"]
-            - slot["first_arrival_us"]
-        ) / 1000
-
-        result.append(
-            {
-                **slot,
-
-                "observed_span_ms":
-                    round(
-                        observed_span_ms,
-                        3,
-                    ),
-            }
+    for slot in page["slots"]:
+        slot["observed_span_ms"] = round(
+            (slot["last_arrival_us"] - slot["first_arrival_us"]) / 1000, 3,
         )
+    return page
 
-    return {
-        "slots": result,
-    }
+
+@app.get("/api/slots/nearest")
+def get_nearest_slot(observed_at: str) -> dict:
+    try:
+        iso_time = observed_at[:-1] + "+00:00" if observed_at.endswith("Z") else observed_at
+        timestamp = datetime.fromisoformat(iso_time)
+        if timestamp.utcoffset() is None:
+            raise ValueError("Missing UTC offset")
+        elapsed = timestamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    except (ValueError, OverflowError) as error:
+        raise HTTPException(422, "Supply an ISO 8601 date/time with a UTC offset") from error
+    requested_us = (elapsed.days * 86400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
+
+    database = ShredDatabase()
+    try:
+        return {"requested_us": requested_us, "match": database.nearest_observed_slot(requested_us)}
+    finally:
+        database.close()
 
 
 @app.get("/api/slots/{slot}")
-def get_slot(slot: int) -> dict:
+def get_slot(slot: Annotated[int, PathParam(ge=0, le=SQLITE_INTEGER_MAX)]) -> dict:
     database = ShredDatabase()
 
     try:
@@ -259,10 +242,19 @@ def get_slot(slot: int) -> dict:
 
 @app.get("/api/live")
 def get_live_slot() -> dict:
+    return live_slot_response(previous=False)
+
+
+@app.get("/api/previous")
+def get_previous_slot() -> dict:
+    return live_slot_response(previous=True)
+
+
+def live_slot_response(*, previous: bool) -> dict:
     database = ShredDatabase()
 
     try:
-        selected = database.get_live_slot(*live_window())
+        selected = database.get_live_slot(*live_window(), previous=previous)
     finally:
         database.close()
 

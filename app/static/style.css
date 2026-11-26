@@ -220,6 +220,21 @@ button:hover {
     display: flex;
 }
 
+.go-to-time {
+    display: flex;
+    gap: 4px;
+}
+
+.history-status {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 8px 0 0;
+}
+
+.history-status:empty {
+    display: none;
+}
+
 
 .go-to-slot input {
     width: 145px;

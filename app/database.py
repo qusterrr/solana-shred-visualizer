@@ -9,6 +9,7 @@ from typing import Iterable
 from app.config import resolve_database_path
 
 DEFAULT_RETENTION_HOURS = 48
+RETENTION_BATCH_SLOTS = 128
 SQLITE_INTEGER_MIN = -(1 << 63)
 SQLITE_INTEGER_MAX = (1 << 63) - 1
 WRITE_ATTEMPTS = 3
@@ -67,6 +68,7 @@ class ShredDatabase:
         )
 
         self._create_schema()
+        self._create_slot_observations()
 
     def _create_schema(self) -> None:
         self.connection.executescript(
@@ -90,10 +92,6 @@ class ShredDatabase:
             ON shred_arrivals(arrival_us);
 
             CREATE INDEX IF NOT EXISTS
-                idx_shred_arrivals_slot
-            ON shred_arrivals(slot);
-
-            CREATE INDEX IF NOT EXISTS
                 idx_shred_arrivals_slot_fec
             ON shred_arrivals(
                 slot,
@@ -110,6 +108,37 @@ class ShredDatabase:
         )
 
         self.connection.commit()
+
+    def _create_slot_observations(self) -> None:
+        exists = "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'slot_observations'"
+        if self.connection.execute(exists).fetchone():
+            return
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if self.connection.execute(exists).fetchone():
+                return
+            self.connection.execute("""
+                CREATE TABLE slot_observations (
+                    slot INTEGER PRIMARY KEY,
+                    first_arrival_us INTEGER NOT NULL,
+                    last_arrival_us INTEGER NOT NULL
+                )
+            """)
+            self.connection.execute("""
+                INSERT INTO slot_observations
+                SELECT slot, MIN(arrival_us), MAX(arrival_us)
+                FROM shred_arrivals GROUP BY slot
+            """)
+            self.connection.execute(
+                "CREATE INDEX idx_slot_observations_first ON slot_observations(first_arrival_us)"
+            )
+            self.connection.execute(
+                "CREATE INDEX idx_slot_observations_last ON slot_observations(last_arrival_us)"
+            )
+            self.connection.execute(
+                "CREATE INDEX idx_shred_arrivals_slot_time ON shred_arrivals(slot, arrival_us)"
+            )
+            self.connection.execute("DROP INDEX IF EXISTS idx_shred_arrivals_slot")
 
     def insert_many(
         self,
@@ -134,6 +163,11 @@ class ShredDatabase:
         if not rows:
             return 0
 
+        observations = {}
+        for arrival_us, _, _, _, slot, *_ in rows:
+            first, last = observations.get(slot, (arrival_us, arrival_us))
+            observations[slot] = (min(first, arrival_us), max(last, arrival_us))
+
         statement = """
             INSERT INTO shred_arrivals (
                 arrival_us,
@@ -153,6 +187,15 @@ class ShredDatabase:
             try:
                 with self.connection:
                     self.connection.executemany(statement, rows)
+                    self.connection.executemany(
+                        """
+                        INSERT INTO slot_observations VALUES (?, ?, ?)
+                        ON CONFLICT(slot) DO UPDATE SET
+                            first_arrival_us = MIN(first_arrival_us, excluded.first_arrival_us),
+                            last_arrival_us = MAX(last_arrival_us, excluded.last_arrival_us)
+                        """,
+                        [(slot, *times) for slot, times in observations.items()],
+                    )
                 return len(rows)
             except sqlite3.OperationalError as error:
                 name = getattr(error, "sqlite_errorname", None)
@@ -206,59 +249,90 @@ class ShredDatabase:
         limit: int = 100,
         before: int | None = None,
         after: int | None = None,
+        *,
+        at: int | None = None,
     ) -> list[dict]:
-        if (
-            before is not None
-            and after is not None
-        ):
-            raise ValueError(
-                "before and after cannot be used together"
-            )
-
-        where_clause = ""
-        parameters: list[int] = []
-
-        if before is not None:
-            where_clause = "WHERE slot < ?"
-            parameters.append(before)
-
-        elif after is not None:
-            where_clause = "WHERE slot > ?"
-            parameters.append(after)
-
-        if after is not None:
-            order = "ASC"
-        else:
-            order = "DESC"
-
-        parameters.append(limit)
+        cursors = [(op, value) for op, value in (("<", before), (">", after), ("<=", at))
+                   if value is not None]
+        if len(cursors) > 1:
+            raise ValueError("Use only one history cursor")
+        where_clause = f"WHERE slot {cursors[0][0]} ?" if cursors else ""
+        parameters = [value for _, value in cursors] + [limit]
+        order = "ASC" if after is not None else "DESC"
 
         rows = self.connection.execute(
             f"""
-            SELECT
-                slot,
-                MIN(arrival_us) AS first_arrival_us,
-                MAX(arrival_us) AS last_arrival_us,
-                COUNT(*) AS arrivals,
-                COUNT(DISTINCT fec_set_index) AS fec_sets
-            FROM shred_arrivals
-            {where_clause}
-            GROUP BY slot
-            ORDER BY slot {order}
-            LIMIT ?
+            SELECT page.*,
+                (SELECT COUNT(*) FROM shred_arrivals WHERE slot = page.slot) AS arrivals,
+                (SELECT COUNT(DISTINCT fec_set_index)
+                 FROM shred_arrivals WHERE slot = page.slot) AS fec_sets
+            FROM (
+                SELECT slot, first_arrival_us, last_arrival_us
+                FROM slot_observations
+                {where_clause}
+                ORDER BY slot {order}
+                LIMIT ?
+            ) AS page
+            ORDER BY page.slot DESC
             """,
             parameters,
         ).fetchall()
 
-        result = [
-            dict(row)
-            for row in rows
-        ]
+        return [dict(row) for row in rows]
 
-        if after is not None:
-            result.reverse()
+    def slot_page(
+        self, limit: int, before: int | None, after: int | None, at: int | None,
+    ) -> dict:
+        with self.connection:
+            self.connection.execute("BEGIN")
+            slots = self.list_slots(limit, before, after, at=at)
+            oldest = slots[-1]["slot"] if slots else None
+            newest = slots[0]["slot"] if slots else None
+            bounds = self.connection.execute(
+                """
+                SELECT EXISTS(SELECT 1 FROM slot_observations WHERE slot < ?),
+                       EXISTS(SELECT 1 FROM slot_observations WHERE slot > ?)
+                """,
+                (oldest, newest),
+            ).fetchone()
+        return {
+            "slots": slots,
+            "oldest_slot": oldest,
+            "newest_slot": newest,
+            "has_older": bool(bounds[0]),
+            "has_newer": bool(bounds[1]),
+        }
 
-        return result
+    def nearest_observed_slot(self, requested_us: int) -> dict | None:
+        with self.connection:
+            self.connection.execute("BEGIN")
+            before, after = self.connection.execute(
+                """
+                SELECT (SELECT MAX(first_arrival_us) FROM slot_observations
+                        WHERE first_arrival_us <= ?),
+                       (SELECT MIN(first_arrival_us) FROM slot_observations
+                        WHERE first_arrival_us >= ?)
+                """,
+                (requested_us, requested_us),
+            ).fetchone()
+            if before is None and after is None:
+                return None
+
+            candidates = [value for value in (before, after) if value is not None]
+            matched_us = min(candidates, key=lambda value: (abs(value - requested_us), value))
+            row = self.connection.execute(
+                """
+                SELECT slot FROM slot_observations
+                WHERE first_arrival_us = ? ORDER BY slot LIMIT 1
+                """,
+                (matched_us,),
+            ).fetchone()
+        return {
+            "slot": row["slot"],
+            "first_arrival_us": matched_us,
+            "difference_us": matched_us - requested_us,
+            "range": "before" if before is None else "after" if after is None else "within",
+        }
 
     def latest_slot(self) -> int | None:
         row = self.connection.execute(
@@ -345,12 +419,26 @@ class ShredDatabase:
         ).fetchone()
         return (row["slot"], row["arrival_us"]) if row is not None else None
 
-    def get_live_slot(self, now_us: int, cutoff_us: int) -> tuple[int, list[dict]] | None:
+    def get_live_slot(
+        self, now_us: int, cutoff_us: int, *, previous: bool = False,
+    ) -> tuple[int, list[dict]] | None:
         with self.connection:
             self.connection.execute("BEGIN")
             observation = self.live_observation(now_us, cutoff_us)
             if observation is not None:
                 slot, _ = observation
+                if previous:
+                    predecessor = self.connection.execute(
+                        """
+                        SELECT slot FROM shred_arrivals
+                        WHERE slot < ? AND arrival_us <= ? AND shred_type IN ('data', 'code')
+                        ORDER BY slot DESC LIMIT 1
+                        """,
+                        (slot, now_us),
+                    ).fetchone()
+                    if predecessor is None:
+                        return None
+                    slot = predecessor["slot"]
                 return slot, self.get_slot(slot)
         return None
 
@@ -367,15 +455,26 @@ class ShredDatabase:
         )
 
         with self.connection:
-            cursor = self.connection.execute(
+            self.connection.execute("BEGIN IMMEDIATE")
+            slots = self.connection.execute(
                 """
-                DELETE FROM shred_arrivals
-                WHERE arrival_us < ?
+                SELECT slot FROM slot_observations
+                WHERE last_arrival_us < ? ORDER BY last_arrival_us, slot LIMIT ?
                 """,
-                (cutoff_us,),
+                (cutoff_us, RETENTION_BATCH_SLOTS),
+            ).fetchall()
+            if not slots:
+                return 0
+            placeholders = ", ".join("?" for _ in slots)
+            parameters = [row["slot"] for row in slots]
+            deleted = self.connection.execute(
+                f"DELETE FROM shred_arrivals WHERE slot IN ({placeholders})", parameters,
+            ).rowcount
+            self.connection.executemany(
+                "DELETE FROM slot_observations WHERE slot = ?",
+                [(slot,) for slot in parameters],
             )
-
-        return cursor.rowcount
+            return deleted
 
     def close(self) -> None:
         self.connection.close()

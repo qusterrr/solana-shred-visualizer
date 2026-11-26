@@ -7,9 +7,10 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
+from threading import Event, Thread
 
 from app.config import DATABASE_ENV, resolve_database_path
-from app.database import ShredArrival, ShredDatabase
+from app.database import DEFAULT_RETENTION_HOURS, ShredArrival, ShredDatabase
 from app.receiver_status import publish_accepted_arrival
 from app.shred import ShredType, parse_shred_header
 
@@ -26,6 +27,23 @@ CLEANUP_INTERVAL_SECONDS = 60.0
 logger = logging.getLogger(__name__)
 
 
+def prune_expired_slots(database_path: Path, stop: Event) -> None:
+    while not stop.wait(CLEANUP_INTERVAL_SECONDS):
+        total = 0
+        try:
+            with closing(ShredDatabase(database_path, timeout=0.25)) as database:
+                while not stop.is_set():
+                    deleted = database.delete_older_than(hours=DEFAULT_RETENTION_HOURS)
+                    if not deleted:
+                        break
+                    total += deleted
+                    stop.wait(0.05)
+        except sqlite3.Error:
+            logger.exception("Could not prune expired slots from %s", database_path)
+        if total:
+            print(f"[cleanup] deleted={total}")
+
+
 def receive_arrivals(sock: socket.socket, database: ShredDatabase) -> None:
     pending: list[ShredArrival] = []
     packet_count = parsed_count = invalid_count = committed_count = 0
@@ -33,7 +51,7 @@ def receive_arrivals(sock: socket.socket, database: ShredDatabase) -> None:
     last_accepted_us = last_published_us = None
 
     started_at = time.monotonic()
-    last_flush = last_stats = last_cleanup = started_at
+    last_flush = last_stats = started_at
     last_status_attempt = float("-inf")
 
     def publish_status() -> None:
@@ -114,16 +132,6 @@ def receive_arrivals(sock: socket.socket, database: ShredDatabase) -> None:
                 flush()
                 last_flush = now
 
-            if now - last_cleanup >= CLEANUP_INTERVAL_SECONDS:
-                try:
-                    deleted = database.delete_older_than(hours=48)
-                except sqlite3.Error:
-                    logger.exception("Could not prune expired arrivals from %s", database.path)
-                else:
-                    if deleted:
-                        print(f"[cleanup] deleted={deleted}")
-                last_cleanup = now
-
             if now - last_stats >= 1.0:
                 report_stats()
                 last_stats = now
@@ -150,7 +158,14 @@ def run_receiver(host: str, port: int, database_path: str | Path | None = None) 
             sock.settimeout(0.2)
             print(f"Listening on UDP {host}:{port}")
             print(f"Database: {database.path}")
-            receive_arrivals(sock, database)
+            stop_cleanup = Event()
+            cleanup = Thread(target=prune_expired_slots, args=(path, stop_cleanup))
+            cleanup.start()
+            try:
+                receive_arrivals(sock, database)
+            finally:
+                stop_cleanup.set()
+                cleanup.join()
     print("Receiver stopped.")
 
 
