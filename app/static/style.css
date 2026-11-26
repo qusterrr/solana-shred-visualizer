@@ -286,3 +286,13 @@ button:hover {
     }
 
 }
+.view-help {
+    min-height: 30px;
+
+    padding: 0 0 10px;
+
+    color: var(--muted);
+
+    font-size: 12px;
+    line-height: 1.5;
+}

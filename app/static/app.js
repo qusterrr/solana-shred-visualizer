@@ -7,6 +7,9 @@ const autoModeSelect =
 const refreshButton =
     document.getElementById("refresh-button");
 
+const cdfButton =
+    document.getElementById("cdf-button");
+
 const timelineButton =
     document.getElementById("timeline-button");
 
@@ -22,17 +25,31 @@ const slotTitle =
 const slotSummary =
     document.getElementById("slot-summary");
 
+const viewHelp =
+    document.getElementById("view-help");
+
 
 const POLL_INTERVAL_MS = 2000;
 
 const DENSITY_BUCKET_MS = 10;
 
-const SLOT_REFERENCE_MS = 400;
+/*
+ * Current slot target/reference duration.
+ * Alexander confirmed that 200 ms should be used,
+ * not the old 400 ms value.
+ */
+const SLOT_REFERENCE_MS = 200;
+
+/*
+ * A FEC set becomes decodable after receiving
+ * 32 unique shreds from that FEC set.
+ */
+const DECODE_THRESHOLD = 32;
 
 
 let selectedSlot = null;
 
-let currentView = "timeline";
+let currentView = "cdf";
 
 let currentData = null;
 
@@ -66,6 +83,11 @@ function setConnectionStatus(
 function setView(view) {
     currentView = view;
 
+    cdfButton.classList.toggle(
+        "active",
+        view === "cdf"
+    );
+
     timelineButton.classList.toggle(
         "active",
         view === "timeline"
@@ -76,9 +98,33 @@ function setView(view) {
         view === "density"
     );
 
+    updateViewHelp();
+
     if (currentData !== null) {
         renderCurrentView();
     }
+}
+
+
+function updateViewHelp() {
+    if (currentView === "cdf") {
+        viewHelp.textContent =
+            "CDF shows how the number of unique received shreds grows over time for each FEC set. " +
+            "A diamond marks the point where 32 unique shreds have been received and the FEC set becomes decodable.";
+
+        return;
+    }
+
+    if (currentView === "timeline") {
+        viewHelp.textContent =
+            "Timeline shows every observed shred arrival. Blue circles are data shreds, yellow squares are coding shreds. " +
+            "A diamond marks when a FEC set becomes decodable.";
+
+        return;
+    }
+
+    viewHelp.textContent =
+        "Density groups arrivals into 10 ms buckets. Color intensity represents the number of arrivals in each bucket.";
 }
 
 
@@ -127,7 +173,7 @@ function chooseAutomaticSlot(slots) {
         return slots[0].slot;
     }
 
-    if (mode === "completed") {
+    if (mode === "previous") {
         if (slots.length > 1) {
             return slots[1].slot;
         }
@@ -168,6 +214,123 @@ function getFecSets(events) {
 }
 
 
+/*
+ * Data and coding shred indices can share numeric values,
+ * therefore the shred type is included in the unique key.
+ */
+function getUniqueShredKey(event) {
+    return (
+        `${event.shred_type}:` +
+        `${event.shred_index}`
+    );
+}
+
+
+/*
+ * Returns arrival information separately for each FEC set.
+ *
+ * Duplicate arrivals do not increase the unique shred count.
+ * decodeTime is the arrival time of the 32nd unique shred.
+ */
+function calculateFecStats(events) {
+    const groups =
+        new Map();
+
+    for (const event of events) {
+        if (
+            !groups.has(
+                event.fec_set_index
+            )
+        ) {
+            groups.set(
+                event.fec_set_index,
+                []
+            );
+        }
+
+        groups
+            .get(event.fec_set_index)
+            .push(event);
+    }
+
+
+    const result =
+        new Map();
+
+
+    for (const [fec, fecEvents] of groups) {
+        const sorted =
+            [...fecEvents].sort(
+                (a, b) =>
+                    a.arrival_ms
+                    - b.arrival_ms
+            );
+
+        const seen =
+            new Set();
+
+        const cumulative = [];
+
+        let decodeTime = null;
+
+
+        for (const event of sorted) {
+            const key =
+                getUniqueShredKey(event);
+
+            if (seen.has(key)) {
+                continue;
+            }
+
+            seen.add(key);
+
+            cumulative.push({
+                arrival_ms:
+                    event.arrival_ms,
+
+                count:
+                    seen.size,
+
+                event:
+                    event,
+            });
+
+
+            if (
+                seen.size ===
+                DECODE_THRESHOLD
+            ) {
+                decodeTime =
+                    event.arrival_ms;
+            }
+        }
+
+
+        result.set(
+            fec,
+            {
+                fec: fec,
+
+                events:
+                    sorted,
+
+                cumulative:
+                    cumulative,
+
+                uniqueCount:
+                    seen.size,
+
+                decodeTime:
+                    decodeTime,
+            }
+        );
+    }
+
+
+    return result;
+}
+
+
 function getTimelineRange(data) {
     const maximum =
         Math.max(
@@ -184,119 +347,210 @@ function getTimelineRange(data) {
 }
 
 
-function createTimeline(data) {
-    const events =
-        data.events;
+function createReferenceLine() {
+    return {
+        type: "line",
+
+        x0: SLOT_REFERENCE_MS,
+        x1: SLOT_REFERENCE_MS,
+
+        y0: 0,
+        y1: 1,
+
+        yref: "paper",
+
+        line: {
+            color: "#737b85",
+            width: 1,
+            dash: "dash",
+        },
+    };
+}
+
+
+function createReferenceAnnotation() {
+    return {
+        x: SLOT_REFERENCE_MS,
+        y: 1,
+
+        xref: "x",
+        yref: "paper",
+
+        text: "200 ms",
+
+        showarrow: false,
+
+        xanchor: "left",
+        yanchor: "bottom",
+
+        font: {
+            size: 10,
+            color: "#737b85",
+        },
+    };
+}
+
+
+/*
+ * CDF / cumulative arrival view.
+ *
+ * Each line represents one FEC set.
+ * Y is the number of unique shreds received.
+ */
+function createCdf(data) {
+    const fecStats =
+        calculateFecStats(
+            data.events
+        );
 
     const fecSets =
-        getFecSets(events);
-
-    const dataEvents =
-        events.filter(
-            event =>
-                event.shred_type === "data"
-        );
-
-    const codeEvents =
-        events.filter(
-            event =>
-                event.shred_type === "code"
+        [...fecStats.keys()].sort(
+            (a, b) => a - b
         );
 
 
-    const dataTrace = {
-        type: "scattergl",
-        mode: "markers",
-
-        name: "Data",
-
-        x: dataEvents.map(
-            event =>
-                event.arrival_ms
-        ),
-
-        y: dataEvents.map(
-            event =>
-                String(
-                    event.fec_set_index
-                )
-        ),
-
-        customdata: dataEvents.map(
-            event => [
-                event.shred_index,
-                event.sender_ip,
-                event.sender_port,
-                event.version,
-            ]
-        ),
-
-        marker: {
-            size: 7,
-            color: "#5b8def",
-            symbol: "circle",
-            opacity: 0.8,
-        },
-
-        hovertemplate:
-            "<b>Data shred</b>" +
-            "<br>Arrival: %{x:.2f} ms" +
-            "<br>FEC: %{y}" +
-            "<br>Index: %{customdata[0]}" +
-            "<br>Sender: %{customdata[1]}:%{customdata[2]}" +
-            "<br>Version: %{customdata[3]}" +
-            "<extra></extra>",
-    };
+    const traces = [];
 
 
-    const codeTrace = {
-        type: "scattergl",
-        mode: "markers",
+    const colors = [
+        "#5b8def",
+        "#62b7a5",
+        "#d6a84b",
+        "#b879d9",
+        "#db7b72",
+        "#7ca7c9",
+        "#93b86b",
+        "#c98fbd",
+        "#9d9d9d",
+    ];
 
-        name: "Coding",
 
-        x: codeEvents.map(
-            event =>
-                event.arrival_ms
-        ),
+    fecSets.forEach(
+        (fec, index) => {
+            const stats =
+                fecStats.get(fec);
 
-        y: codeEvents.map(
-            event =>
-                String(
-                    event.fec_set_index
-                )
-        ),
+            const color =
+                colors[
+                    index
+                    % colors.length
+                ];
 
-        customdata: codeEvents.map(
-            event => [
-                event.shred_index,
-                event.sender_ip,
-                event.sender_port,
-                event.version,
-            ]
-        ),
 
-        marker: {
-            size: 7,
-            color: "#d6a84b",
-            symbol: "square",
-            opacity: 0.8,
-        },
+            traces.push({
+                type: "scattergl",
 
-        hovertemplate:
-            "<b>Coding shred</b>" +
-            "<br>Arrival: %{x:.2f} ms" +
-            "<br>FEC: %{y}" +
-            "<br>Index: %{customdata[0]}" +
-            "<br>Sender: %{customdata[1]}:%{customdata[2]}" +
-            "<br>Version: %{customdata[3]}" +
-            "<extra></extra>",
-    };
+                mode: "lines",
+
+                name:
+                    `FEC ${fec}`,
+
+                x:
+                    stats.cumulative.map(
+                        point =>
+                            point.arrival_ms
+                    ),
+
+                y:
+                    stats.cumulative.map(
+                        point =>
+                            point.count
+                    ),
+
+                line: {
+                    color: color,
+                    width: 2,
+                    shape: "hv",
+                },
+
+                customdata:
+                    stats.cumulative.map(
+                        point => [
+                            fec,
+                            point.event.shred_index,
+                            point.event.shred_type,
+                        ]
+                    ),
+
+                hovertemplate:
+                    "<b>FEC set index %{customdata[0]}</b>" +
+                    "<br>Arrival: %{x:.2f} ms" +
+                    "<br>Unique shreds: %{y}" +
+                    "<br>Index: %{customdata[1]}" +
+                    "<br>Type: %{customdata[2]}" +
+                    "<extra></extra>",
+            });
+
+
+            if (
+                stats.decodeTime !== null
+            ) {
+                traces.push({
+                    type: "scatter",
+
+                    mode: "markers",
+
+                    name:
+                        `FEC ${fec} decodable`,
+
+                    showlegend: false,
+
+                    x: [
+                        stats.decodeTime
+                    ],
+
+                    y: [
+                        DECODE_THRESHOLD
+                    ],
+
+                    customdata: [
+                        [fec]
+                    ],
+
+                    marker: {
+                        size: 10,
+                        symbol:
+                            "diamond-open",
+
+                        color: color,
+
+                        line: {
+                            width: 2,
+                            color: color,
+                        },
+                    },
+
+                    hovertemplate:
+                        "<b>FEC decodable</b>" +
+                        "<br>FEC set index: %{customdata[0]}" +
+                        "<br>Time: %{x:.2f} ms" +
+                        "<br>Unique shreds: 32" +
+                        "<extra></extra>",
+                });
+            }
+        }
+    );
+
+
+    const maximumUnique =
+        Math.max(
+            DECODE_THRESHOLD + 4,
+
+            ...[
+                ...fecStats.values()
+            ].map(
+                stats =>
+                    stats.uniqueCount
+            )
+        );
 
 
     const layout = {
-        paper_bgcolor: "#0b0e11",
-        plot_bgcolor: "#0b0e11",
+        paper_bgcolor:
+            "#0b0e11",
+
+        plot_bgcolor:
+            "#0b0e11",
 
         font: {
             color: "#c9d1d9",
@@ -304,26 +558,39 @@ function createTimeline(data) {
         },
 
         margin: {
-            l: 80,
+            l: 75,
             r: 30,
             t: 25,
             b: 65,
         },
 
-        showlegend: false,
+        hovermode:
+            "closest",
 
-        hovermode: "closest",
+        legend: {
+            orientation: "h",
+
+            x: 0,
+            y: 1.08,
+
+            font: {
+                size: 11,
+                color: "#8b949e",
+            },
+        },
 
         xaxis: {
-            title: "Time since first shred (ms)",
+            title:
+                "Time since first shred (ms)",
 
             range:
                 getTimelineRange(data),
 
-            fixedrange: false,
+            gridcolor:
+                "#1f252c",
 
-            gridcolor: "#1f252c",
-            zeroline: false,
+            zeroline:
+                false,
 
             tickfont: {
                 color: "#8b949e",
@@ -335,17 +602,19 @@ function createTimeline(data) {
         },
 
         yaxis: {
-            title: "FEC set",
+            title:
+                "Unique shreds received",
 
-            type: "category",
+            range: [
+                0,
+                maximumUnique
+            ],
 
-            categoryorder: "array",
+            gridcolor:
+                "#1f252c",
 
-            categoryarray:
-                fecSets.map(String),
-
-            gridcolor: "#1f252c",
-            zeroline: false,
+            zeroline:
+                false,
 
             tickfont: {
                 color: "#8b949e",
@@ -357,38 +626,43 @@ function createTimeline(data) {
         },
 
         shapes: [
+            createReferenceLine(),
+
             {
                 type: "line",
 
-                x0: SLOT_REFERENCE_MS,
-                x1: SLOT_REFERENCE_MS,
+                x0: 0,
+                x1: 1,
 
-                y0: 0,
-                y1: 1,
+                xref: "paper",
 
-                yref: "paper",
+                y0: DECODE_THRESHOLD,
+                y1: DECODE_THRESHOLD,
 
                 line: {
                     color: "#737b85",
                     width: 1,
-                    dash: "dash",
+                    dash: "dot",
                 },
             },
         ],
 
         annotations: [
+            createReferenceAnnotation(),
+
             {
-                x: SLOT_REFERENCE_MS,
-                y: 1,
+                x: 1,
+                y: DECODE_THRESHOLD,
 
-                xref: "x",
-                yref: "paper",
+                xref: "paper",
+                yref: "y",
 
-                text: "400 ms",
+                text:
+                    "decode threshold (32)",
 
                 showarrow: false,
 
-                xanchor: "left",
+                xanchor: "right",
                 yanchor: "bottom",
 
                 font: {
@@ -402,9 +676,309 @@ function createTimeline(data) {
 
     Plotly.react(
         "chart",
+        traces,
+        layout,
+        {
+            responsive: true,
+            displaylogo: false,
+
+            modeBarButtonsToRemove: [
+                "lasso2d",
+                "select2d",
+            ],
+        }
+    );
+}
+
+
+/*
+ * Individual shred arrival timeline.
+ */
+function createTimeline(data) {
+    const events =
+        data.events;
+
+    const fecSets =
+        getFecSets(events);
+
+    const fecStats =
+        calculateFecStats(events);
+
+
+    const dataEvents =
+        events.filter(
+            event =>
+                event.shred_type
+                === "data"
+        );
+
+
+    const codeEvents =
+        events.filter(
+            event =>
+                event.shred_type
+                === "code"
+        );
+
+
+    const dataTrace = {
+        type: "scattergl",
+        mode: "markers",
+
+        name: "Data",
+
+        x:
+            dataEvents.map(
+                event =>
+                    event.arrival_ms
+            ),
+
+        y:
+            dataEvents.map(
+                event =>
+                    String(
+                        event.fec_set_index
+                    )
+            ),
+
+        customdata:
+            dataEvents.map(
+                event => [
+                    event.shred_index,
+                    event.sender_ip,
+                    event.sender_port,
+                    event.version,
+                ]
+            ),
+
+        marker: {
+            size: 7,
+            color: "#5b8def",
+            symbol: "circle",
+            opacity: 0.8,
+        },
+
+        hovertemplate:
+            "<b>Data shred</b>" +
+            "<br>Arrival: %{x:.2f} ms" +
+            "<br>FEC set index: %{y}" +
+            "<br>Index: %{customdata[0]}" +
+            "<br>Sender: %{customdata[1]}:%{customdata[2]}" +
+            "<br>Version: %{customdata[3]}" +
+            "<extra></extra>",
+    };
+
+
+    const codeTrace = {
+        type: "scattergl",
+        mode: "markers",
+
+        name: "Coding",
+
+        x:
+            codeEvents.map(
+                event =>
+                    event.arrival_ms
+            ),
+
+        y:
+            codeEvents.map(
+                event =>
+                    String(
+                        event.fec_set_index
+                    )
+            ),
+
+        customdata:
+            codeEvents.map(
+                event => [
+                    event.shred_index,
+                    event.sender_ip,
+                    event.sender_port,
+                    event.version,
+                ]
+            ),
+
+        marker: {
+            size: 7,
+            color: "#d6a84b",
+            symbol: "square",
+            opacity: 0.8,
+        },
+
+        hovertemplate:
+            "<b>Coding shred</b>" +
+            "<br>Arrival: %{x:.2f} ms" +
+            "<br>FEC set index: %{y}" +
+            "<br>Index: %{customdata[0]}" +
+            "<br>Sender: %{customdata[1]}:%{customdata[2]}" +
+            "<br>Version: %{customdata[3]}" +
+            "<extra></extra>",
+    };
+
+
+    const decodeX = [];
+    const decodeY = [];
+    const decodeCustom = [];
+
+
+    for (
+        const [fec, stats]
+        of fecStats
+    ) {
+        if (
+            stats.decodeTime === null
+        ) {
+            continue;
+        }
+
+        decodeX.push(
+            stats.decodeTime
+        );
+
+        decodeY.push(
+            String(fec)
+        );
+
+        decodeCustom.push(
+            [
+                fec,
+                stats.uniqueCount,
+            ]
+        );
+    }
+
+
+    const decodeTrace = {
+        type: "scatter",
+
+        mode: "markers",
+
+        name:
+            "FEC decodable",
+
+        x: decodeX,
+        y: decodeY,
+
+        customdata:
+            decodeCustom,
+
+        marker: {
+            size: 11,
+
+            color: "#e8eaed",
+
+            symbol:
+                "diamond-open",
+
+            line: {
+                width: 2,
+                color: "#e8eaed",
+            },
+        },
+
+        hovertemplate:
+            "<b>FEC decodable</b>" +
+            "<br>FEC set index: %{customdata[0]}" +
+            "<br>Time: %{x:.2f} ms" +
+            "<br>Threshold: 32 unique shreds" +
+            "<extra></extra>",
+    };
+
+
+    const layout = {
+        paper_bgcolor:
+            "#0b0e11",
+
+        plot_bgcolor:
+            "#0b0e11",
+
+        font: {
+            color: "#c9d1d9",
+            size: 12,
+        },
+
+        margin: {
+            l: 85,
+            r: 30,
+            t: 25,
+            b: 65,
+        },
+
+        showlegend: false,
+
+        hovermode:
+            "closest",
+
+        xaxis: {
+            title:
+                "Time since first shred (ms)",
+
+            range:
+                getTimelineRange(data),
+
+            fixedrange:
+                false,
+
+            gridcolor:
+                "#1f252c",
+
+            zeroline:
+                false,
+
+            tickfont: {
+                color: "#8b949e",
+            },
+
+            titlefont: {
+                color: "#8b949e",
+            },
+        },
+
+        yaxis: {
+            title:
+                "FEC set index",
+
+            type:
+                "category",
+
+            categoryorder:
+                "array",
+
+            categoryarray:
+                fecSets.map(String),
+
+            gridcolor:
+                "#1f252c",
+
+            zeroline:
+                false,
+
+            tickfont: {
+                color: "#8b949e",
+            },
+
+            titlefont: {
+                color: "#8b949e",
+            },
+        },
+
+        shapes: [
+            createReferenceLine(),
+        ],
+
+        annotations: [
+            createReferenceAnnotation(),
+        ],
+    };
+
+
+    Plotly.react(
+        "chart",
         [
             dataTrace,
             codeTrace,
+            decodeTrace,
         ],
         layout,
         {
@@ -420,7 +994,10 @@ function createTimeline(data) {
 }
 
 
-function percentile(values, percentileValue) {
+function percentile(
+    values,
+    percentileValue
+) {
     if (values.length === 0) {
         return 1;
     }
@@ -440,6 +1017,9 @@ function percentile(values, percentileValue) {
 }
 
 
+/*
+ * Aggregated density heatmap.
+ */
 function createDensity(data) {
     const events =
         data.events;
@@ -581,7 +1161,7 @@ function createDensity(data) {
         },
 
         hovertemplate:
-            "FEC %{y}" +
+            "FEC set index %{y}" +
             "<br>Time %{x} ms" +
             "<br>Arrivals %{z}" +
             "<extra></extra>",
@@ -589,15 +1169,18 @@ function createDensity(data) {
 
 
     const layout = {
-        paper_bgcolor: "#0b0e11",
-        plot_bgcolor: "#0b0e11",
+        paper_bgcolor:
+            "#0b0e11",
+
+        plot_bgcolor:
+            "#0b0e11",
 
         font: {
             color: "#c9d1d9",
         },
 
         margin: {
-            l: 80,
+            l: 85,
             r: 70,
             t: 25,
             b: 65,
@@ -607,8 +1190,11 @@ function createDensity(data) {
             title:
                 "Time since first shred (ms)",
 
-            gridcolor: "#1f252c",
-            zeroline: false,
+            gridcolor:
+                "#1f252c",
+
+            zeroline:
+                false,
 
             tickfont: {
                 color: "#8b949e",
@@ -620,16 +1206,20 @@ function createDensity(data) {
         },
 
         yaxis: {
-            title: "FEC set",
+            title:
+                "FEC set index",
 
-            type: "category",
+            type:
+                "category",
 
-            categoryorder: "array",
+            categoryorder:
+                "array",
 
             categoryarray:
                 fecSets.map(String),
 
-            gridcolor: "#1f252c",
+            gridcolor:
+                "#1f252c",
 
             tickfont: {
                 color: "#8b949e",
@@ -641,23 +1231,11 @@ function createDensity(data) {
         },
 
         shapes: [
-            {
-                type: "line",
+            createReferenceLine(),
+        ],
 
-                x0: SLOT_REFERENCE_MS,
-                x1: SLOT_REFERENCE_MS,
-
-                y0: 0,
-                y1: 1,
-
-                yref: "paper",
-
-                line: {
-                    color: "#737b85",
-                    width: 1,
-                    dash: "dash",
-                },
-            },
+        annotations: [
+            createReferenceAnnotation(),
         ],
     };
 
@@ -676,6 +1254,14 @@ function createDensity(data) {
 
 function renderCurrentView() {
     if (currentData === null) {
+        return;
+    }
+
+    if (currentView === "cdf") {
+        createCdf(
+            currentData
+        );
+
         return;
     }
 
@@ -810,12 +1396,18 @@ refreshButton.addEventListener(
 );
 
 
+cdfButton.addEventListener(
+    "click",
+    () => {
+        setView("cdf");
+    }
+);
+
+
 timelineButton.addEventListener(
     "click",
     () => {
-        setView(
-            "timeline"
-        );
+        setView("timeline");
     }
 );
 
@@ -823,9 +1415,7 @@ timelineButton.addEventListener(
 densityButton.addEventListener(
     "click",
     () => {
-        setView(
-            "density"
-        );
+        setView("density");
     }
 );
 
@@ -842,5 +1432,7 @@ setInterval(
     POLL_INTERVAL_MS
 );
 
+
+updateViewHelp();
 
 refresh();

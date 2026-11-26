@@ -28,10 +28,7 @@
 
         <div>
             <h1>Solana Shred Visualizer</h1>
-
-            <p>
-                Turbine shred arrival monitor
-            </p>
+            <p>Turbine shred arrival monitor</p>
         </div>
 
         <div
@@ -66,12 +63,12 @@
 
             <select id="auto-mode">
 
-                <option value="completed">
-                    Latest completed
+                <option value="live" selected>
+                    Live current
                 </option>
 
-                <option value="live">
-                    Live current
+                <option value="previous">
+                    Previous slot
                 </option>
 
                 <option value="off">
@@ -92,8 +89,16 @@
             <div class="button-group">
 
                 <button
-                    id="timeline-button"
+                    id="cdf-button"
                     class="view-button active"
+                    type="button"
+                >
+                    CDF
+                </button>
+
+                <button
+                    id="timeline-button"
+                    class="view-button"
                     type="button"
                 >
                     Timeline
@@ -135,6 +140,11 @@
 
     </section>
 
+    <div
+        id="view-help"
+        class="view-help"
+    ></div>
+
 
     <section class="visualization">
 
@@ -156,8 +166,13 @@
         </span>
 
         <span>
+            ◇
+            FEC decodable
+        </span>
+
+        <span>
             <i class="limit-line"></i>
-            400 ms reference
+            200 ms slot reference
         </span>
 
     </footer>
